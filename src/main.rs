@@ -2,9 +2,18 @@ use clap::{Parser, Subcommand};
 use log::LevelFilter;
 use simplelog::{ConfigBuilder, TermLogger};
 
-use crate::settings::{Settings, StorageLocations};
-
+mod catalog;
 mod settings;
+
+macro_rules! error_exit {
+    ($($values:expr),*) => {{
+        log::error!($($values),*);
+        std::process::exit(0);
+    }};
+}
+pub(crate) use error_exit;
+
+use crate::{catalog::redump::RedumpDatabase, settings::StorageLocations};
 
 #[derive(Parser)]
 #[command(
@@ -36,7 +45,9 @@ enum Command {
 fn import(_path: Option<String>, _settings: settings::Settings) {}
 
 /// Sorts the currently stored game dumps by console
-fn sort(_settings: Settings) {}
+fn sort(_settings: settings::Settings, locations: &StorageLocations) {
+    let _redump_database = RedumpDatabase::init_default(locations);
+}
 
 fn main() {
     // parse cli arguments
@@ -56,12 +67,12 @@ fn main() {
     )
     .unwrap();
     // load settings
-    let locations = StorageLocations::default();
-    let settings = Settings::load(&locations);
+    let locations = settings::StorageLocations::default();
+    let settings = settings::Settings::load(&locations);
     // run command
     match cli.command {
         Some(Command::Import { path }) => import(path, settings),
-        Some(Command::Sort {}) => sort(settings),
+        Some(Command::Sort {}) => sort(settings, &locations),
         None => {}
     }
 }

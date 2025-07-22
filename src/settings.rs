@@ -1,14 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
 
-use log::{debug, error};
+use log::debug;
 
-macro_rules! error_exit {
-    ($($values:expr),*) => {{
-        error!($($values),*);
-        std::process::exit(0);
-    }};
-}
+use crate::error_exit;
 
 macro_rules! no_home_directory {
     () => {
@@ -163,6 +158,7 @@ impl Settings {
         }
     }
     /// Saves a config file to the given storage location
+    #[allow(unused)]
     pub fn save(&self, locations: &StorageLocations) {
         match fs::write(&locations.config_path, serde_yaml::to_string(self).unwrap()) {
             Ok(()) => debug!("Saved config file"),
