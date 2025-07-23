@@ -101,10 +101,6 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Error {
-    fn convert<S: AsRef<str>, E: Into<InnerError>>(message: S) -> impl FnOnce(E) -> Error {
-        let message = message.as_ref().to_string();
-        |err| Error(message, Some(err.into()))
-    }
     fn new<S: AsRef<str>, E: Into<InnerError>>(message: S, error: E) -> Error {
         Error(message.as_ref().to_string(), Some(error.into()))
     }
@@ -114,6 +110,19 @@ impl Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+#[doc(hidden)]
+trait __ResultUtils<T> {
+    fn map_redump_err<S: AsRef<str>>(self, message: S) -> Result<T>;
+}
+impl<T, E: Into<InnerError>> __ResultUtils<T> for std::result::Result<T, E> {
+    fn map_redump_err<S: AsRef<str>>(self, message: S) -> Result<T> {
+        match self {
+            Ok(v) => Ok(v),
+            Err(e) => Err(Error::new(message, e)),
+        }
+    }
+}
 
 /**
  * Redump Database
@@ -129,32 +138,30 @@ impl RedumpDatabase {
     ///
     pub fn init(path: &PathBuf) -> Result<RedumpDatabase> {
         // open the database connection
-        let connection =
-            Connection::open(path).map_err(Error::convert("Failed to open Redump database"))?;
+        let connection = Connection::open(path).map_redump_err("Failed to open Redump database")?;
 
         debug!(r#"Opened Redump database at "{}""#, path.to_str().unwrap());
         // get a list of the database's tables
         let tables = {
-            fn failed_to_retrive(err: rusqlite::Error) -> Error {
-                Error::new(
-                    "Failed to retrieve created tables from Redump Database",
-                    err,
-                )
-            }
             let mut statement = connection
                 .prepare("SELECT * FROM sqlite_master WHERE type = ?")
-                .map_err(failed_to_retrive)?;
+                .map_redump_err("Failed to retrieve created tables from Redump Database")?;
             let mut tables: HashSet<String> = HashSet::new();
-            let mut rows = statement.query(("table",)).map_err(failed_to_retrive)?;
-            while let Some(row) = rows.next().map_err(failed_to_retrive)? {
-                tables.insert(row.get("tbl_name").map_err(failed_to_retrive)?);
+            let mut rows = statement
+                .query(("table",))
+                .map_redump_err("Failed to retrieve created tables from Redump Database")?;
+            while let Some(row) = rows
+                .next()
+                .map_redump_err("Failed to retrieve created tables from Redump Database")?
+            {
+                tables
+                    .insert(row.get("tbl_name").map_redump_err(
+                        "Failed to retrieve created tables from Redump Database",
+                    )?);
             }
             tables
         };
         // create missing tables
-        fn failed_to_create(err: rusqlite::Error) -> Error {
-            Error::new("Failed to create tables in Redump Database", err)
-        }
         if !tables.contains("datfiles") {
             connection
                 .execute(
@@ -169,7 +176,7 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .map_err(failed_to_create)?;
+                .map_redump_err("Failed to create tables in Redump Database")?;
             debug!("Created \"datfiles\" table");
         }
         if !tables.contains("games") {
@@ -186,7 +193,7 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .map_err(failed_to_create)?;
+                .map_redump_err("Failed to create tables in Redump Database")?;
             debug!("Created \"games\" table");
         }
         if !tables.contains("roms") {
@@ -203,18 +210,19 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .map_err(failed_to_create)?;
+                .map_redump_err("Failed to create tables in Redump Database")?;
             debug!("Created \"roms\" table");
         }
         // return the database
         Ok(RedumpDatabase { connection })
     }
 
-    /// Downloads a Redump .DAT file for the given console
+    /// Downloads a Redump .DAT file for the given console.
+    /// Returns the contents of said .DAT file
     ///
     /// Panics if the given console is not indexed by Redump.
     ///
-    fn download_dat(&mut self, console: GameConsole) -> Result<String> {
+    fn download_dat(&self, console: GameConsole) -> Result<String> {
         // get the DAT's url
         let url: String = format!(
             "http://redump.org/datfile/{}/",
@@ -223,28 +231,25 @@ impl RedumpDatabase {
                 .expect("Attempted to download Redump DAT for non-Redump console")
         );
         // create temp zip file and directory
-        let zip_file = NamedTempFile::with_suffix(".zip").map_err(Error::convert(
-            "Failed to create temporary file to download Redump DAT",
-        ))?;
-        let extracted_files = tempdir().map_err(Error::convert(
-            "Failed to create directory file to extract Redump DAT",
-        ))?;
+        let zip_file = NamedTempFile::with_suffix(".zip")
+            .map_redump_err("Failed to create temporary file to download Redump DAT")?;
+        let extracted_files =
+            tempdir().map_redump_err("Failed to create directory file to extract Redump DAT")?;
         // download the DAT's zip archivve
         {
             // make the http request
             let mut response = ureq::get(url)
                 .call()
-                .map_err(Error::convert("Failed to start download"))?;
+                .map_redump_err("Failed to start download")?;
             // clone the file object, because that's something we have to do 😒
             let file = zip_file
                 .as_file()
                 .try_clone()
-                .map_err(Error::convert("Failed to save download"))?;
+                .map_redump_err("Failed to save download")?;
             // write to the file
             let mut writer = BufWriter::new(file);
-            if let Err(err) = std::io::copy(&mut response.body_mut().as_reader(), &mut writer) {
-                return Err(Error::new("Failed to save Redump DAT", err));
-            }
+            std::io::copy(&mut response.body_mut().as_reader(), &mut writer)
+                .map_redump_err("Failed to save Redump DAT")?;
             // done
             debug!(
                 "Downloaded zipped Redump DAT to \"{}\"",
@@ -252,30 +257,32 @@ impl RedumpDatabase {
             );
         }
         // extract it
-        if let Err(err) = uncompress_archive(
+        uncompress_archive(
             BufReader::new(zip_file),
             extracted_files.path(),
             Ownership::Ignore,
-        ) {
-            return Err(Error::new("Failed to extract zip", err));
-        }
+        )
+        .map_redump_err("Failed to extract zip")?;
         debug!(
             "Extracted zipped Redump DAT to \"{}\"",
             extracted_files.path().to_str().unwrap()
         );
         // locate the DAT
         let mut file = 'file_find: {
-            fn failed_to_find(err: std::io::Error) -> Error {
-                Error::new("Failed to find downloaded Redump DAT", err)
-            }
             // iterate over every file
-            for file in extracted_files.path().read_dir().map_err(failed_to_find)? {
-                let path = file.map_err(failed_to_find)?.path();
+            for file in extracted_files
+                .path()
+                .read_dir()
+                .map_redump_err("Failed to find downloaded Redump DAT")?
+            {
+                let path = file
+                    .map_redump_err("Failed to find downloaded Redump DAT")?
+                    .path();
                 // if its extension is .dat, we found it
                 if let Some(extension) = path.extension() {
                     if extension == "dat" {
                         break 'file_find File::open(path)
-                            .map_err(|err| Error::new("Failed to open Redump DAT", err))?;
+                            .map_redump_err("Failed to open Redump DAT")?;
                     }
                 }
             }
@@ -287,7 +294,7 @@ impl RedumpDatabase {
         // read the datfile
         let mut contents = String::new();
         file.read_to_string(&mut contents)
-            .map_err(Error::convert("Failed to read Redump DAT"))?;
+            .map_redump_err("Failed to read Redump DAT")?;
         Ok(contents)
     }
 }
