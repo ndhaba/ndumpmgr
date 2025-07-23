@@ -1,0 +1,12 @@
+[package]
+name = "ndumpmgr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.41", features = ["derive"] }
+log = "0.4.27"
+ndumplib = { version = "0.1.0", path = "../ndumplib" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_yaml = "0.9.34"
+simplelog = "0.12.2"

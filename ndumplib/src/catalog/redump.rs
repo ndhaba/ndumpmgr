@@ -10,7 +10,7 @@ use log::debug;
 use rusqlite::Connection;
 use tempfile::{NamedTempFile, tempdir};
 
-use crate::{catalog::GameConsole, error_exit, settings::StorageLocations};
+use super::GameConsole;
 
 /**
  * Extensions for external structs/enums
@@ -36,11 +36,12 @@ impl GameConsole {
  * Error Types
  */
 #[derive(Debug)]
-pub enum InnerError {
+enum InnerError {
     IOError(std::io::Error),
     NetError(ureq::Error),
     ArchiveError(compress_tools::Error),
     XMLError(roxmltree::Error),
+    SQLiteError(rusqlite::Error),
 }
 
 impl std::fmt::Display for InnerError {
@@ -50,6 +51,7 @@ impl std::fmt::Display for InnerError {
             Self::NetError(e) => write!(f, "Network Error: {e}"),
             Self::ArchiveError(e) => write!(f, "Archive Error: {e}"),
             Self::XMLError(e) => write!(f, "XML Error: {e}"),
+            Self::SQLiteError(e) => write!(f, "SQLite Error: {e}"),
         }
     }
 }
@@ -75,6 +77,12 @@ impl From<compress_tools::Error> for InnerError {
 impl From<roxmltree::Error> for InnerError {
     fn from(error: roxmltree::Error) -> Self {
         Self::XMLError(error)
+    }
+}
+
+impl From<rusqlite::Error> for InnerError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::SQLiteError(error)
     }
 }
 
@@ -108,14 +116,6 @@ impl Error {
 type Result<T> = std::result::Result<T, Error>;
 
 /**
- * Other Structs
- */
-struct XMLDocument<'a> {
-    content: String,
-    document: roxmltree::Document<'a>,
-}
-
-/**
  * Redump Database
  */
 pub struct RedumpDatabase {
@@ -125,33 +125,35 @@ pub struct RedumpDatabase {
 impl RedumpDatabase {
     /// Initializes a Redump database with the given file path.
     ///
-    /// If an error occurs, it will be logged and the program will exit.
-    pub fn init(path: &PathBuf) -> RedumpDatabase {
+    /// Panics if the given path is not valid UTF-8.
+    ///
+    pub fn init(path: &PathBuf) -> Result<RedumpDatabase> {
         // open the database connection
-        let connection = Connection::open(path)
-            .unwrap_or_else(|err| error_exit!("Failed to open Redump database\n{err}"));
+        let connection =
+            Connection::open(path).map_err(Error::convert("Failed to open Redump database"))?;
 
         debug!(r#"Opened Redump database at "{}""#, path.to_str().unwrap());
         // get a list of the database's tables
         let tables = {
-            fn failed_to_retrive<T>(err: rusqlite::Error) -> T {
-                error_exit!("Failed to retrieve created tables from Redump Database\n{err}");
+            fn failed_to_retrive(err: rusqlite::Error) -> Error {
+                Error::new(
+                    "Failed to retrieve created tables from Redump Database",
+                    err,
+                )
             }
             let mut statement = connection
                 .prepare("SELECT * FROM sqlite_master WHERE type = ?")
-                .unwrap_or_else(failed_to_retrive);
+                .map_err(failed_to_retrive)?;
             let mut tables: HashSet<String> = HashSet::new();
-            let mut rows = statement
-                .query(("table",))
-                .unwrap_or_else(failed_to_retrive);
-            while let Some(row) = rows.next().unwrap_or_else(failed_to_retrive) {
-                tables.insert(row.get("tbl_name").unwrap_or_else(failed_to_retrive));
+            let mut rows = statement.query(("table",)).map_err(failed_to_retrive)?;
+            while let Some(row) = rows.next().map_err(failed_to_retrive)? {
+                tables.insert(row.get("tbl_name").map_err(failed_to_retrive)?);
             }
             tables
         };
         // create missing tables
-        fn failed_to_create<T>(err: rusqlite::Error) -> T {
-            error_exit!("Failed to create tables in Redump Database\n{err}")
+        fn failed_to_create(err: rusqlite::Error) -> Error {
+            Error::new("Failed to create tables in Redump Database", err)
         }
         if !tables.contains("datfiles") {
             connection
@@ -167,7 +169,7 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .unwrap_or_else(failed_to_create);
+                .map_err(failed_to_create)?;
             debug!("Created \"datfiles\" table");
         }
         if !tables.contains("games") {
@@ -184,7 +186,7 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .unwrap_or_else(failed_to_create);
+                .map_err(failed_to_create)?;
             debug!("Created \"games\" table");
         }
         if !tables.contains("roms") {
@@ -201,37 +203,33 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .unwrap_or_else(failed_to_create);
+                .map_err(failed_to_create)?;
             debug!("Created \"roms\" table");
         }
         // return the database
-        RedumpDatabase { connection }
+        Ok(RedumpDatabase { connection })
     }
 
-    /// Initializes a Redump database at the default file location relative to a storage location
+    /// Downloads a Redump .DAT file for the given console
     ///
-    /// If an error occurs, it will be logged and the program will exit.
-    pub fn init_default(locations: &StorageLocations) -> RedumpDatabase {
-        let database_path = locations.default_data_path.join("redump.sqlite3");
-        Self::init(&database_path)
-    }
-
-    fn download_datfile(&mut self, console: GameConsole) -> Result<String> {
-        // get the datfile's url
+    /// Panics if the given console is not indexed by Redump.
+    ///
+    fn download_dat(&mut self, console: GameConsole) -> Result<String> {
+        // get the DAT's url
         let url: String = format!(
             "http://redump.org/datfile/{}/",
             console
                 .to_redump_slug()
-                .expect("Attempted to download Redump datfile for non-Redump console")
+                .expect("Attempted to download Redump DAT for non-Redump console")
         );
         // create temp zip file and directory
         let zip_file = NamedTempFile::with_suffix(".zip").map_err(Error::convert(
-            "Failed to create temporary file to download datfile",
+            "Failed to create temporary file to download Redump DAT",
         ))?;
         let extracted_files = tempdir().map_err(Error::convert(
-            "Failed to create directory file to extract datfile",
+            "Failed to create directory file to extract Redump DAT",
         ))?;
-        // download the datfile's zip archivve
+        // download the DAT's zip archivve
         {
             // make the http request
             let mut response = ureq::get(url)
@@ -245,11 +243,11 @@ impl RedumpDatabase {
             // write to the file
             let mut writer = BufWriter::new(file);
             if let Err(err) = std::io::copy(&mut response.body_mut().as_reader(), &mut writer) {
-                return Err(Error::new("Failed to save redump datfile", err));
+                return Err(Error::new("Failed to save Redump DAT", err));
             }
             // done
             debug!(
-                "Downloaded zipped Redump datfile to \"{}\"",
+                "Downloaded zipped Redump DAT to \"{}\"",
                 zip_file.path().to_str().unwrap()
             );
         }
@@ -262,13 +260,13 @@ impl RedumpDatabase {
             return Err(Error::new("Failed to extract zip", err));
         }
         debug!(
-            "Extracted zipped Redump datfile to \"{}\"",
+            "Extracted zipped Redump DAT to \"{}\"",
             extracted_files.path().to_str().unwrap()
         );
-        // locate the datfile
+        // locate the DAT
         let mut file = 'file_find: {
             fn failed_to_find(err: std::io::Error) -> Error {
-                Error::new("Failed to find downloaded datfile", err)
+                Error::new("Failed to find downloaded Redump DAT", err)
             }
             // iterate over every file
             for file in extracted_files.path().read_dir().map_err(failed_to_find)? {
@@ -277,19 +275,19 @@ impl RedumpDatabase {
                 if let Some(extension) = path.extension() {
                     if extension == "dat" {
                         break 'file_find File::open(path)
-                            .map_err(|err| Error::new("Failed to open datfile", err))?;
+                            .map_err(|err| Error::new("Failed to open Redump DAT", err))?;
                     }
                 }
             }
             // if we can't find the datfile, there's nothing we can do
             return Err(Error::new_original(
-                "Failed to find downloaded datfile. It wasn't included",
+                "Failed to find downloaded Redump DAT.\nNot included in the download",
             ));
         };
         // read the datfile
         let mut contents = String::new();
         file.read_to_string(&mut contents)
-            .map_err(Error::convert("Failed to read datfile"))?;
+            .map_err(Error::convert("Failed to read Redump DAT"))?;
         Ok(contents)
     }
 }

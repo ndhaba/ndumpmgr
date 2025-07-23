@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use log::LevelFilter;
+use ndumplib::redump::RedumpDatabase;
 use simplelog::{ConfigBuilder, TermLogger};
 
-mod catalog;
 mod settings;
 
 macro_rules! error_exit {
@@ -13,7 +13,7 @@ macro_rules! error_exit {
 }
 pub(crate) use error_exit;
 
-use crate::{catalog::redump::RedumpDatabase, settings::StorageLocations};
+use crate::settings::StorageLocations;
 
 #[derive(Parser)]
 #[command(
@@ -46,7 +46,8 @@ fn import(_path: Option<String>, _settings: settings::Settings) {}
 
 /// Sorts the currently stored game dumps by console
 fn sort(_settings: settings::Settings, locations: &StorageLocations) {
-    let _redump_database = RedumpDatabase::init_default(locations);
+    let _redump_database = RedumpDatabase::init(&locations.default_data_path.join("redump.sqlite"))
+        .unwrap_or_else(|err| error_exit!("{}", err));
 }
 
 fn main() {
