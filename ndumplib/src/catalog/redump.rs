@@ -345,11 +345,10 @@ impl RedumpDatabase {
 
     /// Bumps up a game's revision by one
     ///
-    fn bump_game_revision(&self, game_id: i64) -> Result<()> {
+    fn bump_game_revision(connection: &impl CanPrepare, game_id: i64) -> Result<()> {
         // prepare a statement for the bumping
-        let mut statement = self
-            .connection
-            .prepare_cached("UPDATE games SET revision = revision + 1 WHERE game_id = ?")
+        let mut statement = connection
+            .prepare_cached_common("UPDATE games SET revision = revision + 1 WHERE game_id = ?")
             .redump("Failed to update games in redump DB")?;
         // BUMP IT BUMP IT BUMP IT BUMP IT
         let row_count = statement
@@ -369,11 +368,10 @@ impl RedumpDatabase {
     ///
     /// If the given console is not found, a new entry is created.
     ///
-    fn get_datafile_from_db(&self, console: &str) -> Result<RedumpDatafile> {
+    fn get_datafile_from_db(connection: &impl CanPrepare, console: &str) -> Result<RedumpDatafile> {
         // prepare a statement to find the datafile
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT * FROM datafiles WHERE console = ?")
+        let mut statement = connection
+            .prepare_cached_common("SELECT * FROM datafiles WHERE console = ?")
             .redump("Failed to retrieve datafile meta from redump DB")?;
         // parse the result
         let datafile = statement
@@ -388,15 +386,15 @@ impl RedumpDatabase {
             .optional()
             .redump("Failed to retrieve datafile meta from redump DB")?;
         // handle our parsed result
+        drop(statement);
         match datafile {
             // if the datafile was found, return it
             Some(datafile) => Ok(datafile),
             // if the datafile was not found, create a new one
             None => {
                 // prepare an insert statement
-                let mut statement = self
-                    .connection
-                    .prepare_cached(
+                let mut statement = connection
+                    .prepare_cached_common(
                         "INSERT INTO datafiles (console, version, last_updated) VALUES (?, ?, ?)",
                     )
                     .redump("Failed to update datafile meta in redump DB")?;
@@ -406,18 +404,21 @@ impl RedumpDatabase {
                     .redump("Failed to update datafile meta in redump DB")?;
                 // rerun this function
                 // unless some SQLite tomfoolery happens, there will at most be 1 recursive call
-                self.get_datafile_from_db(console)
+                drop(statement);
+                RedumpDatabase::get_datafile_from_db(connection, console)
             }
         }
     }
 
     /// Get all of the games included from a certain datafile
     ///
-    fn get_games_of_datafile(&self, datafile_id: i64) -> Result<Vec<RedumpGame>> {
+    fn get_games_of_datafile(
+        connection: &impl CanPrepare,
+        datafile_id: i64,
+    ) -> Result<Vec<RedumpGame>> {
         // prepare a statement to find all of the games
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT gid, name, revision FROM games WHERE dfid = ?")
+        let mut statement = connection
+            .prepare_cached_common("SELECT gid, name, revision FROM games WHERE dfid = ?")
             .redump("Failed to retrieve games stored in redump DB")?;
         // make the query
         let mut rows = statement
@@ -442,11 +443,10 @@ impl RedumpDatabase {
 
     /// Get all of the ROM files associated with a game
     ///
-    fn get_redump_roms(&self, game_id: i64) -> Result<Vec<RedumpRom>> {
+    fn get_redump_roms(connection: &impl CanPrepare, game_id: i64) -> Result<Vec<RedumpRom>> {
         // prepare a statement to find all of the ROMs
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT name, size, crc, sha1 FROM roms WHERE gid = ?")
+        let mut statement = connection
+            .prepare_cached_common("SELECT name, size, crc, sha1 FROM roms WHERE gid = ?")
             .redump("Failed to retrieve game ROMs from redump DB")?;
         // make the query
         let mut rows = statement
@@ -473,20 +473,22 @@ impl RedumpDatabase {
     ///
     /// Returns its game ID
     ///
-    fn insert_new_game(&self, datafile_id: i64, name: &String) -> Result<i64> {
+    fn insert_new_game(
+        connection: &impl CanPrepare,
+        datafile_id: i64,
+        name: &String,
+    ) -> Result<i64> {
         // prepare a statement to insert the game into the database
-        let mut insert_game_stmt = self
-            .connection
-            .prepare_cached("INSERT INTO games (dfid, name) VALUES (?, ?)")
+        let mut insert_game_stmt = connection
+            .prepare_cached_common("INSERT INTO games (dfid, name) VALUES (?, ?)")
             .redump("Failed to update games in redump DB")?;
         // add the game
         insert_game_stmt
             .execute((datafile_id, name))
             .redump("Failed to update games in redump DB")?;
         // prepare a statement to get the game ID
-        let mut get_game_id_stmt = self
-            .connection
-            .prepare_cached("SELECT gid FROM games WHERE dfid = ? AND name = ?")
+        let mut get_game_id_stmt = connection
+            .prepare_cached_common("SELECT gid FROM games WHERE dfid = ? AND name = ?")
             .redump("Failed to retrieve games from redump DB")?;
         // get the game ID
         get_game_id_stmt
@@ -497,14 +499,15 @@ impl RedumpDatabase {
     /// Inserts new ROMs for a certain game in the database
     ///
     fn insert_new_roms<'a>(
-        &self,
+        connection: &impl CanPrepare,
         game_id: i64,
         roms: impl Iterator<Item = &'a RedumpRom>,
     ) -> Result<()> {
         // prepare a statement for adding ROMs
-        let mut statement = self
-            .connection
-            .prepare_cached("INSERT INTO roms (gid, name, size, crc, sha1) VALUES (?, ?, ?, ?, ?)")
+        let mut statement = connection
+            .prepare_cached_common(
+                "INSERT INTO roms (gid, name, size, crc, sha1) VALUES (?, ?, ?, ?, ?)",
+            )
             .redump("Failed to update game ROMs in redump DB")?;
         // time to add each ROM
         for rom in roms {
@@ -518,27 +521,26 @@ impl RedumpDatabase {
 
     /// Removes a game from the database, along with its associated games
     ///
-    fn remove_game(&self, game_id: i64) -> Result<()> {
+    fn remove_game(connection: &impl CanPrepare, game_id: i64) -> Result<()> {
         // prepare a statement for deleting the game
-        let mut statement = self
-            .connection
-            .prepare_cached("DELETE FROM games WHERE gid = ?")
+        let mut statement = connection
+            .prepare_cached_common("DELETE FROM games WHERE gid = ?")
             .redump("Failed to update games in redump DB")?;
         // delete it
         statement
             .execute((game_id,))
             .redump("Failed to update games in redump DB")?;
         // delete the roms too
-        self.remove_game_roms(game_id)
+        drop(statement);
+        RedumpDatabase::remove_game_roms(connection, game_id)
     }
 
     /// Removes a game's ROMs
     ///
-    fn remove_game_roms(&self, game_id: i64) -> Result<()> {
+    fn remove_game_roms(connection: &impl CanPrepare, game_id: i64) -> Result<()> {
         // prepare a statement for deleting the game ROMs
-        let mut statement = self
-            .connection
-            .prepare_cached("DELETE FROM roms WHERE gid = ?")
+        let mut statement = connection
+            .prepare_cached_common("DELETE FROM roms WHERE gid = ?")
             .redump("Failed to update game ROMs in redump DB")?;
         // delete them
         statement
@@ -549,11 +551,12 @@ impl RedumpDatabase {
 
     /// Updates a datafile's metadata in the database
     ///
-    fn update_datafile(&self, datafile: &RedumpDatafile) -> Result<()> {
+    fn update_datafile(connection: &impl CanPrepare, datafile: &RedumpDatafile) -> Result<()> {
         // prepare a statement to update the datafile
-        let mut statement = self
-            .connection
-            .prepare_cached("UPDATE datafiles SET version = ?, last_updated = ? WHERE dfid = ?")
+        let mut statement = connection
+            .prepare_cached_common(
+                "UPDATE datafiles SET version = ?, last_updated = ? WHERE dfid = ?",
+            )
             .redump("Failed to update datafile in redump DB")?;
         // update the datafile
         let rows_changed = statement
@@ -581,7 +584,7 @@ impl RedumpDatabase {
     ///
     /// Panics if the given console is not indexed by Redump.
     ///
-    fn import_datafile(&self, console: GameConsole, contents: &String) -> Result<()> {
+    fn import_datafile(&mut self, console: GameConsole, contents: &String) -> Result<()> {
         // parse the xml-formatted datafile
         let timer = SystemTime::now();
         let document = Document::parse_with_options(
@@ -606,10 +609,15 @@ impl RedumpDatabase {
             .text()
             .unwrap_or("");
         // get the in-database datafile metadata
-        let mut datafile = self.get_datafile_from_db(console.to_redump_slug().unwrap())?;
+        let transaction = self
+            .connection
+            .transaction()
+            .redump("Failed to start transaction in redump DB")?;
+        let mut datafile =
+            RedumpDatabase::get_datafile_from_db(&transaction, console.to_redump_slug().unwrap())?;
         // get all of the currently stored games
         let mut stored_games: HashMap<String, i64> = HashMap::new();
-        for game in self.get_games_of_datafile(datafile.dfid)? {
+        for game in RedumpDatabase::get_games_of_datafile(&transaction, datafile.dfid)? {
             stored_games.insert(game.name, game.gid);
         }
         debug!("Previously stored games: {}", stored_games.len());
@@ -643,7 +651,7 @@ impl RedumpDatabase {
                 let gid = gid.clone();
                 // check that the ROMs are equal
                 let roms_equal = 'are_roms_equal: {
-                    let stored_roms = self.get_redump_roms(gid)?;
+                    let stored_roms = RedumpDatabase::get_redump_roms(&transaction, gid)?;
                     if stored_roms.len() != roms.len() {
                         break 'are_roms_equal false;
                     }
@@ -660,16 +668,17 @@ impl RedumpDatabase {
                     unchanged_entries += 1;
                 } else {
                     changed_entries += 1;
-                    self.remove_game_roms(gid)?;
-                    self.insert_new_roms(gid, roms.iter())?;
-                    self.bump_game_revision(gid)?;
+                    RedumpDatabase::remove_game_roms(&transaction, gid)?;
+                    RedumpDatabase::insert_new_roms(&transaction, gid, roms.iter())?;
+                    RedumpDatabase::bump_game_revision(&transaction, gid)?;
                 }
                 // remove the name-id+rev mapping. this will be useful later
                 stored_games.remove(&game_name);
             } else {
                 new_entries += 1;
-                self.insert_new_roms(
-                    self.insert_new_game(datafile.dfid, &game_name)?,
+                RedumpDatabase::insert_new_roms(
+                    &transaction,
+                    RedumpDatabase::insert_new_game(&transaction, datafile.dfid, &game_name)?,
                     roms.iter(),
                 )?;
             }
@@ -683,12 +692,15 @@ impl RedumpDatabase {
         // we must remove these
         let removed_games = stored_games.len();
         for (_, gid) in stored_games {
-            self.remove_game(gid)?;
+            RedumpDatabase::remove_game(&transaction, gid)?;
         }
         // update the version and last updated field within the database
         datafile.version = version.to_string();
         datafile.last_updated = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        self.update_datafile(&datafile)?;
+        RedumpDatabase::update_datafile(&transaction, &datafile)?;
+        transaction
+            .commit()
+            .redump("Failed to commit changes to redump DB")?;
         // post our stats :D
         let runtime = timer.elapsed().unwrap();
         debug!(
@@ -718,8 +730,11 @@ impl RedumpDatabase {
     /// If the last time this console was updated is within the minimum update delay,
     /// nothing will happen.
     ///
-    pub fn update_console(&self, console: GameConsole) -> Result<()> {
-        let datafile = self.get_datafile_from_db(console.to_redump_slug().unwrap())?;
+    pub fn update_console(&mut self, console: GameConsole) -> Result<()> {
+        let datafile = RedumpDatabase::get_datafile_from_db(
+            &self.connection,
+            console.to_redump_slug().unwrap(),
+        )?;
         let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         if current_time - datafile.last_updated >= self.min_update_delay {
             self.import_datafile(console, &self.download_datafile(console)?)

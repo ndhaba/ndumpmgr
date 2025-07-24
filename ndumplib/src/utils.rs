@@ -1,4 +1,5 @@
 use roxmltree::Node;
+use rusqlite::{CachedStatement, Connection, Transaction};
 
 #[derive(Debug)]
 pub(crate) struct XMLUtilsError(String);
@@ -101,5 +102,23 @@ impl<'a, 'input, const N: usize> XMLHexAttribute<[u8; N]> for Node<'a, 'input> {
                 N * 8
             ))),
         }
+    }
+}
+
+pub(crate) trait CanPrepare {
+    fn prepare_cached_common(&self, sql: &str) -> rusqlite::Result<CachedStatement>;
+}
+
+impl CanPrepare for Connection {
+    #[inline(always)]
+    fn prepare_cached_common(&self, sql: &str) -> rusqlite::Result<CachedStatement> {
+        self.prepare_cached(sql)
+    }
+}
+
+impl<'a> CanPrepare for Transaction<'a> {
+    #[inline(always)]
+    fn prepare_cached_common(&self, sql: &str) -> rusqlite::Result<CachedStatement> {
+        self.prepare_cached(sql)
     }
 }

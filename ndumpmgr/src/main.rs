@@ -46,8 +46,9 @@ fn import(_path: Option<String>, _settings: settings::Settings) {}
 
 /// Sorts the currently stored game dumps by console
 fn sort(_settings: settings::Settings, locations: &StorageLocations) {
-    let redump_database = RedumpDatabase::init(&locations.default_data_path.join("redump.sqlite"))
-        .unwrap_or_else(|err| error_exit!("{}", err));
+    let mut redump_database =
+        RedumpDatabase::init(&locations.default_data_path.join("redump.sqlite"))
+            .unwrap_or_else(|err| error_exit!("{}", err));
     match redump_database.update_console(GameConsole::PSX) {
         Ok(_) => (),
         Err(err) => error_exit!("{err}"),
