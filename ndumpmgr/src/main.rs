@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use log::LevelFilter;
-use ndumplib::{GameConsole, redump::RedumpDatabase};
+use log::{LevelFilter, info};
+use ndumplib::redump::RedumpDatabase;
 use simplelog::{ConfigBuilder, TermLogger};
 
 mod settings;
@@ -46,13 +46,15 @@ fn import(_path: Option<String>, _settings: settings::Settings) {}
 
 /// Sorts the currently stored game dumps by console
 fn sort(_settings: settings::Settings, locations: &StorageLocations) {
+    // setup databases
     let mut redump_database =
         RedumpDatabase::init(&locations.default_data_path.join("redump.sqlite"))
             .unwrap_or_else(|err| error_exit!("{}", err));
-    match redump_database.update() {
-        Ok(_) => (),
-        Err(err) => error_exit!("{err}"),
-    };
+    // check for updates
+    info!("Checking for game updates");
+    redump_database
+        .update()
+        .unwrap_or_else(|err| error_exit!("{err}"));
 }
 
 fn main() {

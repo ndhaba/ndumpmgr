@@ -147,18 +147,21 @@ impl<T> __ResultUtils<T> for std::option::Option<T> {
 /**
  * Internal Types
  */
+#[allow(unused)]
 struct RedumpDatafile {
     dfid: i64,
     console: String,
     version: String,
     last_updated: Duration,
 }
+#[allow(unused)]
 struct RedumpGame {
     dfid: i64,
     gid: i64,
     name: String,
     revision: i64,
 }
+#[allow(unused)]
 #[derive(PartialEq, Eq, Hash)]
 struct RedumpRom {
     name: String,
@@ -175,6 +178,16 @@ pub struct RedumpDatabase {
     min_update_delay: Duration,
 }
 
+impl Drop for RedumpDatabase {
+    fn drop(&mut self) {
+        self.connection
+            .execute("PRAGMA optimize;", ())
+            .redump("Failed to optimize redump DB")
+            .unwrap();
+        debug!("Optimized redump DB before dropping");
+    }
+}
+
 impl RedumpDatabase {
     /// Initializes a Redump database with the given file path.
     ///
@@ -183,7 +196,9 @@ impl RedumpDatabase {
     pub fn init(path: &PathBuf) -> Result<RedumpDatabase> {
         // open the database connection
         let connection = Connection::open(path).redump("Failed to open Redump database")?;
-        connection.set_prepared_statement_cache_capacity(16);
+        connection.set_prepared_statement_cache_capacity(32);
+        debug!(r#"Opened Redump database at "{}""#, path.to_str().unwrap());
+        // configure the database
         connection
             .pragma_update(None, "page_size", 16384)
             .redump("Failed to configure redump DB")?;
@@ -196,29 +211,29 @@ impl RedumpDatabase {
         connection
             .pragma_update(None, "synchronous", "normal")
             .redump("Failed to configure redump DB")?;
-        debug!(r#"Opened Redump database at "{}""#, path.to_str().unwrap());
-        // get a list of the database's tables
-        let tables = {
+        // get a list of the database's tables and indexes
+        let things = {
             let mut statement = connection
-                .prepare("SELECT * FROM sqlite_master WHERE type = ?")
+                .prepare("SELECT * FROM sqlite_master WHERE type = 'table' OR type = 'index'")
                 .redump("Failed to retrieve created tables from redump DB")?;
             let mut tables: HashSet<String> = HashSet::new();
             let mut rows = statement
-                .query(("table",))
+                .query(())
                 .redump("Failed to retrieve created tables from redump DB")?;
             while let Some(row) = rows
                 .next()
                 .redump("Failed to retrieve created tables from redump DB")?
             {
                 tables.insert(
-                    row.get("tbl_name")
+                    row.get("name")
                         .redump("Failed to retrieve created tables from redump DB")?,
                 );
             }
             tables
         };
-        // create missing tables
-        if !tables.contains("datafiles") {
+        // create missing tables and indexes
+        let mut changed = false;
+        if !things.contains("datafiles") {
             connection
                 .execute(
                     r#"
@@ -234,8 +249,9 @@ impl RedumpDatabase {
                 )
                 .redump("Failed to create tables in redump DB")?;
             debug!("Created \"datafiles\" table");
+            changed = true;
         }
-        if !tables.contains("games") {
+        if !things.contains("games") {
             connection
                 .execute(
                     r#"
@@ -251,8 +267,9 @@ impl RedumpDatabase {
                 )
                 .redump("Failed to create tables in redump DB")?;
             debug!("Created \"games\" table");
+            changed = true;
         }
-        if !tables.contains("roms") {
+        if !things.contains("roms") {
             connection
                 .execute(
                     r#"
@@ -267,6 +284,10 @@ impl RedumpDatabase {
                     (),
                 )
                 .redump("Failed to create tables in redump DB")?;
+            debug!("Created \"roms\" table");
+            changed = true;
+        }
+        if !things.contains("game_roms") {
             connection
                 .execute(
                     r#"
@@ -277,7 +298,15 @@ impl RedumpDatabase {
                     (),
                 )
                 .redump("Failed to create tables in redump DB")?;
-            debug!("Created \"roms\" table");
+            debug!("Created \"game_roms\" table");
+            changed = true;
+        }
+        // optimize the database if the tables were changed
+        if changed {
+            connection
+                .execute("PRAGMA optimize;", ())
+                .redump("Failed to optimize redump DB")?;
+            debug!("Optimized");
         }
         // return the database
         Ok(RedumpDatabase {
@@ -588,6 +617,15 @@ impl RedumpDatabase {
         }
     }
 
+    /// Shrink the database
+    ///
+    fn vacuum(&self) -> Result<()> {
+        self.connection
+            .execute("VACUUM", ())
+            .redump("Failed to shrink redump DB")?;
+        Ok(())
+    }
+
     /// Imports a datafile
     ///
     /// This does not check if the provided datafile contents match the console.
@@ -746,7 +784,7 @@ impl RedumpDatabase {
     /// If the last time this console was updated is within the minimum update delay,
     /// nothing will happen.
     ///
-    pub fn update_console(&mut self, console: GameConsole) -> Result<()> {
+    fn update_console(&mut self, console: GameConsole) -> Result<()> {
         let datafile = RedumpDatabase::get_datafile_from_db(
             &self.connection,
             console.to_redump_slug().unwrap(),
@@ -771,6 +809,7 @@ impl RedumpDatabase {
         self.update_console(GameConsole::Wii)?;
         self.update_console(GameConsole::Xbox)?;
         self.update_console(GameConsole::Xbox360)?;
+        self.vacuum()?;
         Ok(())
     }
 }
