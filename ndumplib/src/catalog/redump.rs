@@ -7,7 +7,7 @@ use std::{
 };
 
 use compress_tools::{Ownership, uncompress_archive};
-use log::debug;
+use log::{debug, info};
 use roxmltree::{Document, ParsingOptions};
 use rusqlite::{Connection, OptionalExtension};
 use tempfile::{NamedTempFile, tempdir};
@@ -242,7 +242,7 @@ impl RedumpDatabase {
                         CREATE TABLE "games" (
                             "dfid"	INTEGER NOT NULL,
                             "gid"	INTEGER NOT NULL UNIQUE,
-                            "name"	TEXT NOT NULL UNIQUE,
+                            "name"	TEXT NOT NULL,
                             "revision"	INTEGER NOT NULL DEFAULT 0,
                             PRIMARY KEY("gid")
                         )
@@ -258,7 +258,7 @@ impl RedumpDatabase {
                     r#"
                         CREATE TABLE "roms" (
                             "gid"	INTEGER NOT NULL,
-                            "name"	TEXT NOT NULL UNIQUE,
+                            "name"	TEXT NOT NULL,
                             "size"	INTEGER NOT NULL,
                             "crc"	INTEGER NOT NULL,
                             "sha1"	BLOB NOT NULL
@@ -662,8 +662,9 @@ impl RedumpDatabase {
             let mut roms = HashSet::new();
             for rom_element in game.get_tagged_children("rom") {
                 let error_message = format!("Failed to parse datafile (at game \"{game_name}\")");
+                let name: String = rom_element.attr("name").redump(&error_message)?;
                 roms.insert(RedumpRom {
-                    name: rom_element.attr("name").redump(&error_message)?,
+                    name: name.replace(game_name.as_str(), "#"),
                     size: rom_element.attr("size").redump(&error_message)?,
                     crc: rom_element.attr_hex("crc").redump(&error_message)?,
                     sha1: rom_element.attr_hex("sha1").redump(&error_message)?,
@@ -760,9 +761,24 @@ impl RedumpDatabase {
         )?;
         let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         if current_time - datafile.last_updated >= self.min_update_delay {
-            self.import_datafile(console, &self.download_datafile(console)?)
-        } else {
-            Ok(())
+            self.import_datafile(console, &self.download_datafile(console)?)?;
+            info!("Updated {} games", console.to_formal_name());
         }
+        Ok(())
+    }
+
+    /// Downloads all necessary Redump datafiles and imports them into the database.
+    ///
+    pub fn update(&mut self) -> Result<()> {
+        self.update_console(GameConsole::Dreamcast)?;
+        self.update_console(GameConsole::GameCube)?;
+        self.update_console(GameConsole::PSX)?;
+        self.update_console(GameConsole::PS2)?;
+        self.update_console(GameConsole::PS3)?;
+        self.update_console(GameConsole::PSP)?;
+        self.update_console(GameConsole::Wii)?;
+        self.update_console(GameConsole::Xbox)?;
+        self.update_console(GameConsole::Xbox360)?;
+        Ok(())
     }
 }

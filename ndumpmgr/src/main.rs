@@ -49,7 +49,7 @@ fn sort(_settings: settings::Settings, locations: &StorageLocations) {
     let mut redump_database =
         RedumpDatabase::init(&locations.default_data_path.join("redump.sqlite"))
             .unwrap_or_else(|err| error_exit!("{}", err));
-    match redump_database.update_console(GameConsole::PSX) {
+    match redump_database.update() {
         Ok(_) => (),
         Err(err) => error_exit!("{err}"),
     };
