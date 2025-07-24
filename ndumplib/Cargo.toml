@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 compress-tools = "0.15.1"
+hex = "0.4.3"
 log = "0.4.27"
 roxmltree = "0.20.0"
 rusqlite = "0.37.0"
