@@ -499,18 +499,10 @@ impl RedumpDatabase {
     ) -> Result<i64> {
         // prepare a statement to insert the game into the database
         let mut insert_game_stmt = connection
-            .prepare_cached_common("INSERT INTO games (dfid, name) VALUES (?, ?)")
+            .prepare_cached_common("INSERT INTO games (dfid, name) VALUES (?, ?) RETURNING gid")
             .redump("Failed to update games in redump DB")?;
         // add the game
         insert_game_stmt
-            .execute((datafile_id, name))
-            .redump("Failed to update games in redump DB")?;
-        // prepare a statement to get the game ID
-        let mut get_game_id_stmt = connection
-            .prepare_cached_common("SELECT gid FROM games WHERE dfid = ? AND name = ?")
-            .redump("Failed to retrieve games from redump DB")?;
-        // get the game ID
-        get_game_id_stmt
             .query_one((datafile_id, name), |row| Ok(row.get(0).unwrap()))
             .redump("Failed to retrieve games from redump DB")
     }
