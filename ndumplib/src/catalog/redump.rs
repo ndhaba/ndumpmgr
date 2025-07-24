@@ -185,8 +185,17 @@ impl RedumpDatabase {
         let connection = Connection::open(path).redump("Failed to open Redump database")?;
         connection.set_prepared_statement_cache_capacity(16);
         connection
+            .pragma_update(None, "page_size", 16384)
+            .redump("Failed to configure redump DB")?;
+        connection
+            .pragma_update(None, "cache_size", 2000)
+            .redump("Failed to configure redump DB")?;
+        connection
             .pragma_update(None, "journal_mode", "WAL")
-            .redump("Failed to open Redump database")?;
+            .redump("Failed to configure redump DB")?;
+        connection
+            .pragma_update(None, "synchronous", "normal")
+            .redump("Failed to configure redump DB")?;
         debug!(r#"Opened Redump database at "{}""#, path.to_str().unwrap());
         // get a list of the database's tables
         let tables = {
@@ -741,5 +750,9 @@ impl RedumpDatabase {
         } else {
             Ok(())
         }
+    }
+
+    pub fn update_console_bench(&mut self, console: GameConsole, path: &str) -> Result<()> {
+        self.import_datafile(console, &std::fs::read_to_string(path).unwrap())
     }
 }
