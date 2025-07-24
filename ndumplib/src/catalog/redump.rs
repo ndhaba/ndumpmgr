@@ -267,6 +267,16 @@ impl RedumpDatabase {
                     (),
                 )
                 .redump("Failed to create tables in redump DB")?;
+            connection
+                .execute(
+                    r#"
+                        CREATE INDEX "game_roms" ON "roms" (
+                            "gid"	DESC
+                        )
+                    "#,
+                    (),
+                )
+                .redump("Failed to create tables in redump DB")?;
             debug!("Created \"roms\" table");
         }
         // return the database
@@ -357,7 +367,7 @@ impl RedumpDatabase {
     fn bump_game_revision(connection: &impl CanPrepare, game_id: i64) -> Result<()> {
         // prepare a statement for the bumping
         let mut statement = connection
-            .prepare_cached_common("UPDATE games SET revision = revision + 1 WHERE game_id = ?")
+            .prepare_cached_common("UPDATE games SET revision = revision + 1 WHERE gid = ?")
             .redump("Failed to update games in redump DB")?;
         // BUMP IT BUMP IT BUMP IT BUMP IT
         let row_count = statement
@@ -441,9 +451,9 @@ impl RedumpDatabase {
         {
             games.push(RedumpGame {
                 dfid: datafile_id,
-                gid: row.get("gid").unwrap(),
-                name: row.get("name").unwrap(),
-                revision: row.get("revision").unwrap(),
+                gid: row.get(0).unwrap(),
+                name: row.get(1).unwrap(),
+                revision: row.get(2).unwrap(),
             });
         }
         // return the games
@@ -468,10 +478,10 @@ impl RedumpDatabase {
             .redump("Failed to retrieve game ROMs from redump DB")?
         {
             roms.push(RedumpRom {
-                name: row.get("name").unwrap(),
-                size: row.get("size").unwrap(),
-                crc: row.get("crc").unwrap(),
-                sha1: row.get("sha1").unwrap(),
+                name: row.get(0).unwrap(),
+                size: row.get(1).unwrap(),
+                crc: row.get(2).unwrap(),
+                sha1: row.get(3).unwrap(),
             });
         }
         // done :D
@@ -501,7 +511,7 @@ impl RedumpDatabase {
             .redump("Failed to retrieve games from redump DB")?;
         // get the game ID
         get_game_id_stmt
-            .query_one((datafile_id, name), |row| Ok(row.get("gid").unwrap()))
+            .query_one((datafile_id, name), |row| Ok(row.get(0).unwrap()))
             .redump("Failed to retrieve games from redump DB")
     }
 
@@ -625,10 +635,14 @@ impl RedumpDatabase {
         let mut datafile =
             RedumpDatabase::get_datafile_from_db(&transaction, console.to_redump_slug().unwrap())?;
         // get all of the currently stored games
-        let mut stored_games: HashMap<String, i64> = HashMap::new();
-        for game in RedumpDatabase::get_games_of_datafile(&transaction, datafile.dfid)? {
-            stored_games.insert(game.name, game.gid);
-        }
+        let mut stored_games: HashMap<String, i64> = {
+            let games = RedumpDatabase::get_games_of_datafile(&transaction, datafile.dfid)?;
+            let mut map = HashMap::with_capacity(games.len());
+            for game in games {
+                map.insert(game.name, game.gid);
+            }
+            map
+        };
         debug!("Previously stored games: {}", stored_games.len());
         // iterate over every game
         let mut unchanged_entries: usize = 0;
@@ -750,9 +764,5 @@ impl RedumpDatabase {
         } else {
             Ok(())
         }
-    }
-
-    pub fn update_console_bench(&mut self, console: GameConsole, path: &str) -> Result<()> {
-        self.import_datafile(console, &std::fs::read_to_string(path).unwrap())
     }
 }
