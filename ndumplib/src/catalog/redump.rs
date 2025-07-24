@@ -8,7 +8,7 @@ use std::{
 
 use compress_tools::{Ownership, uncompress_archive};
 use log::debug;
-use roxmltree::Document;
+use roxmltree::{Document, ParsingOptions};
 use rusqlite::{Connection, OptionalExtension};
 use tempfile::{NamedTempFile, tempdir};
 
@@ -23,6 +23,7 @@ impl GameConsole {
     /// Attempts to find a slug to use for downloading a Redump datafile
     fn to_redump_slug(&self) -> Option<&str> {
         match self {
+            Self::Dreamcast => Some("dc"),
             Self::GameCube => Some("gc"),
             Self::PSX => Some("psx"),
             Self::PS2 => Some("ps2"),
@@ -67,31 +68,26 @@ impl From<std::io::Error> for InnerError {
         Self::IOError(error)
     }
 }
-
 impl From<ureq::Error> for InnerError {
     fn from(error: ureq::Error) -> Self {
         Self::NetError(error)
     }
 }
-
 impl From<compress_tools::Error> for InnerError {
     fn from(error: compress_tools::Error) -> Self {
         Self::ArchiveError(error)
     }
 }
-
 impl From<roxmltree::Error> for InnerError {
     fn from(error: roxmltree::Error) -> Self {
         Self::XMLError(error)
     }
 }
-
 impl From<XMLUtilsError> for InnerError {
     fn from(value: XMLUtilsError) -> Self {
         Self::XMLUtilsError(value)
     }
 }
-
 impl From<rusqlite::Error> for InnerError {
     fn from(error: rusqlite::Error) -> Self {
         Self::SQLiteError(error)
@@ -157,14 +153,12 @@ struct RedumpDatafile {
     version: String,
     last_updated: Duration,
 }
-
 struct RedumpGame {
     dfid: i64,
     gid: i64,
     name: String,
     revision: i64,
 }
-
 #[derive(PartialEq, Eq, Hash)]
 struct RedumpRom {
     name: String,
@@ -178,6 +172,7 @@ struct RedumpRom {
  */
 pub struct RedumpDatabase {
     connection: Connection,
+    min_update_delay: Duration,
 }
 
 impl RedumpDatabase {
@@ -189,6 +184,9 @@ impl RedumpDatabase {
         // open the database connection
         let connection = Connection::open(path).redump("Failed to open Redump database")?;
         connection.set_prepared_statement_cache_capacity(16);
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .redump("Failed to open Redump database")?;
         debug!(r#"Opened Redump database at "{}""#, path.to_str().unwrap());
         // get a list of the database's tables
         let tables = {
@@ -263,7 +261,10 @@ impl RedumpDatabase {
             debug!("Created \"roms\" table");
         }
         // return the database
-        Ok(RedumpDatabase { connection })
+        Ok(RedumpDatabase {
+            connection,
+            min_update_delay: Duration::from_secs(60 * 60 * 24),
+        })
     }
 
     /// Downloads a Redump datafile for the given console.
@@ -272,7 +273,7 @@ impl RedumpDatabase {
     /// Panics if the given console is not indexed by Redump.
     ///
     fn download_datafile(&self, console: GameConsole) -> Result<String> {
-        // get the DAT's url
+        // get the datafile's url
         let url: String = format!(
             "http://redump.org/datfile/{}/",
             console
@@ -284,7 +285,7 @@ impl RedumpDatabase {
             .redump("Failed to create temporary file to download datafile")?;
         let extracted_files =
             tempdir().redump("Failed to create directory file to extract datafile")?;
-        // download the DAT's zip archivve
+        // download the datafile's zip archivve
         {
             // make the http request
             let mut response = ureq::get(url).call().redump("Failed to start download")?;
@@ -314,7 +315,7 @@ impl RedumpDatabase {
             "Extracted zipped datafile to \"{}\"",
             extracted_files.path().to_str().unwrap()
         );
-        // locate the DAT
+        // locate the datafile
         let mut file = 'file_find: {
             // iterate over every file
             for file in extracted_files
@@ -573,16 +574,24 @@ impl RedumpDatabase {
         }
     }
 
-    /// Imports a .DAT file
+    /// Imports a datafile
     ///
-    /// This does not check if the provided DAT file contents match the console.
+    /// This does not check if the provided datafile contents match the console.
     /// A mismatch will almost certainly break the database.
     ///
     /// Panics if the given console is not indexed by Redump.
     ///
-    fn import_dat(&mut self, console: GameConsole, contents: &String) -> Result<()> {
-        // parse the xml-formatted DAT
-        let document = Document::parse(contents.as_ref()).redump("Failed to parse datafile")?;
+    fn import_datafile(&self, console: GameConsole, contents: &String) -> Result<()> {
+        // parse the xml-formatted datafile
+        let timer = SystemTime::now();
+        let document = Document::parse_with_options(
+            contents.as_ref(),
+            ParsingOptions {
+                allow_dtd: true,
+                nodes_limit: u32::MAX,
+            },
+        )
+        .redump("Failed to parse datafile")?;
         // find the root element
         let datafile_node = document
             .root()
@@ -681,11 +690,41 @@ impl RedumpDatabase {
         datafile.last_updated = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         self.update_datafile(&datafile)?;
         // post our stats :D
+        let runtime = timer.elapsed().unwrap();
         debug!(
-            r#"Changed entries: {}\nUnchanged entries: {}\nAdded entries: {}\nRemoved entries: {}"#,
+            "Changed entries: {}\nUnchanged entries: {}\nAdded entries: {}\nRemoved entries: {}",
             changed_entries, unchanged_entries, new_entries, removed_games
+        );
+        debug!(
+            "Time to import: {}s {}ms",
+            runtime.as_secs(),
+            runtime.subsec_millis()
         );
         // we're done... finally
         Ok(())
+    }
+
+    /// Changes the minimum update delay
+    ///
+    /// Datfiles are updated infrequently, so this time should be in the scale of days.
+    /// The higher the value, the less strain ndumplib puts on Redump servers.
+    ///
+    pub fn set_minimum_update_delay(&mut self, time: Duration) {
+        self.min_update_delay = time;
+    }
+
+    /// Downloads the Redump datafile for the given console and imports it.
+    ///
+    /// If the last time this console was updated is within the minimum update delay,
+    /// nothing will happen.
+    ///
+    pub fn update_console(&self, console: GameConsole) -> Result<()> {
+        let datafile = self.get_datafile_from_db(console.to_redump_slug().unwrap())?;
+        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        if current_time - datafile.last_updated >= self.min_update_delay {
+            self.import_datafile(console, &self.download_datafile(console)?)
+        } else {
+            Ok(())
+        }
     }
 }

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use log::LevelFilter;
-use ndumplib::redump::RedumpDatabase;
+use ndumplib::{GameConsole, redump::RedumpDatabase};
 use simplelog::{ConfigBuilder, TermLogger};
 
 mod settings;
@@ -46,8 +46,12 @@ fn import(_path: Option<String>, _settings: settings::Settings) {}
 
 /// Sorts the currently stored game dumps by console
 fn sort(_settings: settings::Settings, locations: &StorageLocations) {
-    let _redump_database = RedumpDatabase::init(&locations.default_data_path.join("redump.sqlite"))
+    let redump_database = RedumpDatabase::init(&locations.default_data_path.join("redump.sqlite"))
         .unwrap_or_else(|err| error_exit!("{}", err));
+    match redump_database.update_console(GameConsole::PSX) {
+        Ok(_) => (),
+        Err(err) => error_exit!("{err}"),
+    };
 }
 
 fn main() {
