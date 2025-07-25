@@ -81,10 +81,10 @@ impl<'a, 'input> XMLPlainAttribute<usize> for Node<'a, 'input> {
     }
 }
 
-impl<'a, 'input> XMLHexAttribute<u32> for Node<'a, 'input> {
-    fn attr_hex(&self, name: &str) -> Result<u32, XMLUtilsError> {
+impl<'a, 'input> XMLHexAttribute<i32> for Node<'a, 'input> {
+    fn attr_hex(&self, name: &str) -> Result<i32, XMLUtilsError> {
         let buffer: [u8; 4] = self.attr_hex(name)?;
-        Ok(u32::from_be_bytes(buffer))
+        Ok(i32::from_be_bytes(buffer))
     }
 }
 
@@ -120,5 +120,26 @@ impl<'a> CanPrepare for Transaction<'a> {
     #[inline(always)]
     fn prepare_cached_common(&self, sql: &str) -> rusqlite::Result<CachedStatement> {
         self.prepare_cached(sql)
+    }
+}
+
+#[doc(hidden)]
+pub(crate) trait ResultUtils<T> {
+    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T>;
+}
+impl<T, E: Into<crate::catalog::InnerError>> ResultUtils<T> for std::result::Result<T, E> {
+    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T> {
+        match self {
+            Ok(v) => Ok(v),
+            Err(e) => Err(crate::catalog::Error::new(message, e)),
+        }
+    }
+}
+impl<T> ResultUtils<T> for std::option::Option<T> {
+    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T> {
+        match self {
+            Some(v) => Ok(v),
+            None => Err(crate::catalog::Error::new_original(message)),
+        }
     }
 }

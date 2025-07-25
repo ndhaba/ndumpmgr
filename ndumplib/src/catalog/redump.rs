@@ -12,7 +12,10 @@ use roxmltree::{Document, ParsingOptions};
 use rusqlite::{Connection, OptionalExtension};
 use tempfile::{NamedTempFile, tempdir};
 
-use crate::utils::*;
+use crate::{
+    catalog::{Error, Result},
+    utils::*,
+};
 
 use super::GameConsole;
 
@@ -33,113 +36,6 @@ impl GameConsole {
             Self::Xbox => Some("xbox"),
             Self::Xbox360 => Some("xbox360"),
             _ => None,
-        }
-    }
-}
-
-/**
- * Error Types
- */
-#[derive(Debug)]
-enum InnerError {
-    IOError(std::io::Error),
-    NetError(ureq::Error),
-    ArchiveError(compress_tools::Error),
-    XMLError(roxmltree::Error),
-    XMLUtilsError(XMLUtilsError),
-    SQLiteError(rusqlite::Error),
-}
-
-impl std::fmt::Display for InnerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IOError(e) => write!(f, "I/O Error: {e}"),
-            Self::NetError(e) => write!(f, "Network Error: {e}"),
-            Self::ArchiveError(e) => write!(f, "Archive Error: {e}"),
-            Self::XMLError(e) => write!(f, "XML Error: {e}"),
-            Self::XMLUtilsError(e) => write!(f, "{e}"),
-            Self::SQLiteError(e) => write!(f, "SQLite Error: {e}"),
-        }
-    }
-}
-
-impl From<std::io::Error> for InnerError {
-    fn from(error: std::io::Error) -> Self {
-        Self::IOError(error)
-    }
-}
-impl From<ureq::Error> for InnerError {
-    fn from(error: ureq::Error) -> Self {
-        Self::NetError(error)
-    }
-}
-impl From<compress_tools::Error> for InnerError {
-    fn from(error: compress_tools::Error) -> Self {
-        Self::ArchiveError(error)
-    }
-}
-impl From<roxmltree::Error> for InnerError {
-    fn from(error: roxmltree::Error) -> Self {
-        Self::XMLError(error)
-    }
-}
-impl From<XMLUtilsError> for InnerError {
-    fn from(value: XMLUtilsError) -> Self {
-        Self::XMLUtilsError(value)
-    }
-}
-impl From<rusqlite::Error> for InnerError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::SQLiteError(error)
-    }
-}
-
-#[derive(Debug)]
-pub struct Error(String, Option<InnerError>);
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error(str, Some(err)) => write!(f, "{str}\n{err}"),
-            Error(str, None) => write!(f, "{str}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl Error {
-    /// Creates a new [Error] with the given message and internal error
-    ///
-    fn new<S: AsRef<str>, E: Into<InnerError>>(message: S, error: E) -> Error {
-        Error(message.as_ref().to_string(), Some(error.into()))
-    }
-    /// Creates a new [Error] without a separate internal error
-    ///
-    fn new_original<S: AsRef<str>>(message: S) -> Error {
-        Error(message.as_ref().to_string(), None)
-    }
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-#[doc(hidden)]
-trait __ResultUtils<T> {
-    fn redump<S: AsRef<str>>(self, message: S) -> Result<T>;
-}
-impl<T, E: Into<InnerError>> __ResultUtils<T> for std::result::Result<T, E> {
-    fn redump<S: AsRef<str>>(self, message: S) -> Result<T> {
-        match self {
-            Ok(v) => Ok(v),
-            Err(e) => Err(Error::new(message, e)),
-        }
-    }
-}
-impl<T> __ResultUtils<T> for std::option::Option<T> {
-    fn redump<S: AsRef<str>>(self, message: S) -> Result<T> {
-        match self {
-            Some(v) => Ok(v),
-            None => Err(Error::new_original(message)),
         }
     }
 }
@@ -166,7 +62,7 @@ struct RedumpGame {
 struct RedumpRom {
     name: String,
     size: usize,
-    crc: u32,
+    crc: i32,
     sha1: [u8; 20],
 }
 
@@ -182,7 +78,7 @@ impl Drop for RedumpDatabase {
     fn drop(&mut self) {
         self.connection
             .execute("PRAGMA optimize;", ())
-            .redump("Failed to optimize redump DB")
+            .catalog("Failed to optimize redump DB")
             .unwrap();
         debug!("Optimized redump DB before dropping");
     }
@@ -195,38 +91,38 @@ impl RedumpDatabase {
     ///
     pub fn init(path: &PathBuf) -> Result<RedumpDatabase> {
         // open the database connection
-        let connection = Connection::open(path).redump("Failed to open Redump database")?;
+        let connection = Connection::open(path).catalog("Failed to open redump DB")?;
         connection.set_prepared_statement_cache_capacity(32);
         debug!(r#"Opened Redump database at "{}""#, path.to_str().unwrap());
         // configure the database
         connection
             .pragma_update(None, "page_size", 16384)
-            .redump("Failed to configure redump DB")?;
+            .catalog("Failed to configure redump DB")?;
         connection
             .pragma_update(None, "cache_size", 2000)
-            .redump("Failed to configure redump DB")?;
+            .catalog("Failed to configure redump DB")?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
-            .redump("Failed to configure redump DB")?;
+            .catalog("Failed to configure redump DB")?;
         connection
             .pragma_update(None, "synchronous", "normal")
-            .redump("Failed to configure redump DB")?;
+            .catalog("Failed to configure redump DB")?;
         // get a list of the database's tables and indexes
         let things = {
             let mut statement = connection
                 .prepare("SELECT * FROM sqlite_master WHERE type = 'table' OR type = 'index'")
-                .redump("Failed to retrieve created tables from redump DB")?;
+                .catalog("Failed to retrieve created tables from redump DB")?;
             let mut tables: HashSet<String> = HashSet::new();
             let mut rows = statement
                 .query(())
-                .redump("Failed to retrieve created tables from redump DB")?;
+                .catalog("Failed to retrieve created tables from redump DB")?;
             while let Some(row) = rows
                 .next()
-                .redump("Failed to retrieve created tables from redump DB")?
+                .catalog("Failed to retrieve created tables from redump DB")?
             {
                 tables.insert(
                     row.get("name")
-                        .redump("Failed to retrieve created tables from redump DB")?,
+                        .catalog("Failed to retrieve created tables from redump DB")?,
                 );
             }
             tables
@@ -247,7 +143,7 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .redump("Failed to create tables in redump DB")?;
+                .catalog("Failed to create tables in redump DB")?;
             debug!("Created \"datafiles\" table");
             changed = true;
         }
@@ -265,7 +161,7 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .redump("Failed to create tables in redump DB")?;
+                .catalog("Failed to create tables in redump DB")?;
             debug!("Created \"games\" table");
             changed = true;
         }
@@ -283,7 +179,7 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .redump("Failed to create tables in redump DB")?;
+                .catalog("Failed to create tables in redump DB")?;
             debug!("Created \"roms\" table");
             changed = true;
         }
@@ -297,15 +193,15 @@ impl RedumpDatabase {
                     "#,
                     (),
                 )
-                .redump("Failed to create tables in redump DB")?;
-            debug!("Created \"game_roms\" table");
+                .catalog("Failed to create tables in redump DB")?;
+            debug!("Created \"game_roms\" index");
             changed = true;
         }
         // optimize the database if the tables were changed
         if changed {
             connection
                 .execute("PRAGMA optimize;", ())
-                .redump("Failed to optimize redump DB")?;
+                .catalog("Failed to optimize redump DB")?;
             debug!("Optimized");
         }
         // return the database
@@ -326,26 +222,26 @@ impl RedumpDatabase {
             "http://redump.org/datfile/{}/",
             console
                 .to_redump_slug()
-                .expect("Attempted to download datafile for non-Redump console")
+                .expect("Attempted to download datafile from redump.org for non-Redump console")
         );
         // create temp zip file and directory
         let zip_file = NamedTempFile::with_suffix(".zip")
-            .redump("Failed to create temporary file to download datafile")?;
+            .catalog("Failed to create temporary file to download datafile")?;
         let extracted_files =
-            tempdir().redump("Failed to create directory file to extract datafile")?;
+            tempdir().catalog("Failed to create directory file to extract datafile")?;
         // download the datafile's zip archivve
         {
             // make the http request
-            let mut response = ureq::get(url).call().redump("Failed to start download")?;
+            let mut response = ureq::get(url).call().catalog("Failed to start download")?;
             // clone the file object, because that's something we have to do 😒
             let file = zip_file
                 .as_file()
                 .try_clone()
-                .redump("Failed to save download")?;
+                .catalog("Failed to save download")?;
             // write to the file
             let mut writer = BufWriter::new(file);
             std::io::copy(&mut response.body_mut().as_reader(), &mut writer)
-                .redump("Failed to save datafile")?;
+                .catalog("Failed to save datafile")?;
             // done
             debug!(
                 "Downloaded zipped datafile to \"{}\"",
@@ -358,7 +254,7 @@ impl RedumpDatabase {
             extracted_files.path(),
             Ownership::Ignore,
         )
-        .redump("Failed to extract zip")?;
+        .catalog("Failed to extract zip")?;
         debug!(
             "Extracted zipped datafile to \"{}\"",
             extracted_files.path().to_str().unwrap()
@@ -369,13 +265,13 @@ impl RedumpDatabase {
             for file in extracted_files
                 .path()
                 .read_dir()
-                .redump("Failed to find downloaded datafile")?
+                .catalog("Failed to find downloaded datafile")?
             {
-                let path = file.redump("Failed to find downloaded datafile")?.path();
+                let path = file.catalog("Failed to find downloaded datafile")?.path();
                 // if its extension is .dat, we found it
                 if let Some(extension) = path.extension() {
                     if extension == "dat" {
-                        break 'file_find File::open(path).redump("Failed to open datafile")?;
+                        break 'file_find File::open(path).catalog("Failed to open datafile")?;
                     }
                 }
             }
@@ -387,7 +283,7 @@ impl RedumpDatabase {
         // read the datafile
         let mut contents = String::new();
         file.read_to_string(&mut contents)
-            .redump("Failed to read datafile")?;
+            .catalog("Failed to read datafile")?;
         Ok(contents)
     }
 
@@ -397,11 +293,11 @@ impl RedumpDatabase {
         // prepare a statement for the bumping
         let mut statement = connection
             .prepare_cached_common("UPDATE games SET revision = revision + 1 WHERE gid = ?")
-            .redump("Failed to update games in redump DB")?;
+            .catalog("Failed to update games in redump DB")?;
         // BUMP IT BUMP IT BUMP IT BUMP IT
         let row_count = statement
             .execute((game_id,))
-            .redump("Failed to update games in redump DB")?;
+            .catalog("Failed to update games in redump DB")?;
         // make sure the bump happened
         if row_count == 1 {
             Ok(())
@@ -420,7 +316,7 @@ impl RedumpDatabase {
         // prepare a statement to find the datafile
         let mut statement = connection
             .prepare_cached_common("SELECT * FROM datafiles WHERE console = ?")
-            .redump("Failed to retrieve datafile meta from redump DB")?;
+            .catalog("Failed to retrieve datafile meta from redump DB")?;
         // parse the result
         let datafile = statement
             .query_one((console,), |row| {
@@ -432,7 +328,7 @@ impl RedumpDatabase {
                 })
             })
             .optional()
-            .redump("Failed to retrieve datafile meta from redump DB")?;
+            .catalog("Failed to retrieve datafile meta from redump DB")?;
         // handle our parsed result
         drop(statement);
         match datafile {
@@ -445,11 +341,11 @@ impl RedumpDatabase {
                     .prepare_cached_common(
                         "INSERT INTO datafiles (console, version, last_updated) VALUES (?, ?, ?)",
                     )
-                    .redump("Failed to update datafile meta in redump DB")?;
+                    .catalog("Failed to update datafile meta in redump DB")?;
                 // execute it
                 statement
                     .execute((console, "", 0))
-                    .redump("Failed to update datafile meta in redump DB")?;
+                    .catalog("Failed to update datafile meta in redump DB")?;
                 // rerun this function
                 // unless some SQLite tomfoolery happens, there will at most be 1 recursive call
                 drop(statement);
@@ -467,16 +363,16 @@ impl RedumpDatabase {
         // prepare a statement to find all of the games
         let mut statement = connection
             .prepare_cached_common("SELECT gid, name, revision FROM games WHERE dfid = ?")
-            .redump("Failed to retrieve games stored in redump DB")?;
+            .catalog("Failed to retrieve games stored in redump DB")?;
         // make the query
         let mut rows = statement
             .query((datafile_id,))
-            .redump("Failed to retrieve games stored in redump DB")?;
+            .catalog("Failed to retrieve games stored in redump DB")?;
         // collect the games
         let mut games = Vec::new();
         while let Some(row) = rows
             .next()
-            .redump("Failed to retrieve games stored in redump DB")?
+            .catalog("Failed to retrieve games stored in redump DB")?
         {
             games.push(RedumpGame {
                 dfid: datafile_id,
@@ -495,16 +391,16 @@ impl RedumpDatabase {
         // prepare a statement to find all of the ROMs
         let mut statement = connection
             .prepare_cached_common("SELECT name, size, crc, sha1 FROM roms WHERE gid = ?")
-            .redump("Failed to retrieve game ROMs from redump DB")?;
+            .catalog("Failed to retrieve game ROMs from redump DB")?;
         // make the query
         let mut rows = statement
             .query((game_id,))
-            .redump("Failed to retrieve game ROMs from redump DB")?;
+            .catalog("Failed to retrieve game ROMs from redump DB")?;
         // collect all of the ROMs
         let mut roms = Vec::new();
         while let Some(row) = rows
             .next()
-            .redump("Failed to retrieve game ROMs from redump DB")?
+            .catalog("Failed to retrieve game ROMs from redump DB")?
         {
             roms.push(RedumpRom {
                 name: row.get(0).unwrap(),
@@ -529,11 +425,11 @@ impl RedumpDatabase {
         // prepare a statement to insert the game into the database
         let mut insert_game_stmt = connection
             .prepare_cached_common("INSERT INTO games (dfid, name) VALUES (?, ?) RETURNING gid")
-            .redump("Failed to update games in redump DB")?;
+            .catalog("Failed to update games in redump DB")?;
         // add the game
         insert_game_stmt
             .query_one((datafile_id, name), |row| Ok(row.get(0).unwrap()))
-            .redump("Failed to retrieve games from redump DB")
+            .catalog("Failed to retrieve games from redump DB")
     }
 
     /// Inserts new ROMs for a certain game in the database
@@ -548,12 +444,12 @@ impl RedumpDatabase {
             .prepare_cached_common(
                 "INSERT INTO roms (gid, name, size, crc, sha1) VALUES (?, ?, ?, ?, ?)",
             )
-            .redump("Failed to update game ROMs in redump DB")?;
+            .catalog("Failed to update game ROMs in redump DB")?;
         // time to add each ROM
         for rom in roms {
             statement
                 .execute((game_id, &rom.name, rom.size, rom.crc, rom.sha1))
-                .redump("Failed to update game ROMs in redump DB")?;
+                .catalog("Failed to update game ROMs in redump DB")?;
         }
         // done :D
         Ok(())
@@ -565,11 +461,11 @@ impl RedumpDatabase {
         // prepare a statement for deleting the game
         let mut statement = connection
             .prepare_cached_common("DELETE FROM games WHERE gid = ?")
-            .redump("Failed to update games in redump DB")?;
+            .catalog("Failed to update games in redump DB")?;
         // delete it
         statement
             .execute((game_id,))
-            .redump("Failed to update games in redump DB")?;
+            .catalog("Failed to update games in redump DB")?;
         // delete the roms too
         drop(statement);
         RedumpDatabase::remove_game_roms(connection, game_id)
@@ -581,11 +477,11 @@ impl RedumpDatabase {
         // prepare a statement for deleting the game ROMs
         let mut statement = connection
             .prepare_cached_common("DELETE FROM roms WHERE gid = ?")
-            .redump("Failed to update game ROMs in redump DB")?;
+            .catalog("Failed to update game ROMs in redump DB")?;
         // delete them
         statement
             .execute((game_id,))
-            .redump("Failed to update game ROMs in redump DB")?;
+            .catalog("Failed to update game ROMs in redump DB")?;
         Ok(())
     }
 
@@ -597,7 +493,7 @@ impl RedumpDatabase {
             .prepare_cached_common(
                 "UPDATE datafiles SET version = ?, last_updated = ? WHERE dfid = ?",
             )
-            .redump("Failed to update datafile in redump DB")?;
+            .catalog("Failed to update datafile in redump DB")?;
         // update the datafile
         let rows_changed = statement
             .execute((
@@ -605,7 +501,7 @@ impl RedumpDatabase {
                 datafile.last_updated.as_millis() as i64,
                 datafile.dfid,
             ))
-            .redump("Failed to update datafile in redump DB")?;
+            .catalog("Failed to update datafile in redump DB")?;
         // make sure only one row was changed
         if rows_changed == 1 {
             Ok(())
@@ -622,7 +518,7 @@ impl RedumpDatabase {
     fn vacuum(&self) -> Result<()> {
         self.connection
             .execute("VACUUM", ())
-            .redump("Failed to shrink redump DB")?;
+            .catalog("Failed to shrink redump DB")?;
         Ok(())
     }
 
@@ -643,25 +539,25 @@ impl RedumpDatabase {
                 nodes_limit: u32::MAX,
             },
         )
-        .redump("Failed to parse datafile")?;
+        .catalog("Failed to parse datafile")?;
         // find the root element
         let datafile_node = document
             .root()
             .get_tagged_child("datafile")
-            .redump("Failed to parse datafile\nMissing <datafile>")?;
+            .catalog("Failed to parse datafile\nMissing <datafile>")?;
         // find the version
         let version = datafile_node
             .get_tagged_child("header")
-            .redump("Failed to parse datafile\nMissing <header>")?
+            .catalog("Failed to parse datafile\nMissing <header>")?
             .get_tagged_child("version")
-            .redump("Failed to parse datafile\n<header> missing <version>")?
+            .catalog("Failed to parse datafile\n<header> missing <version>")?
             .text()
             .unwrap_or("");
         // get the in-database datafile metadata
         let transaction = self
             .connection
             .transaction()
-            .redump("Failed to start transaction in redump DB")?;
+            .catalog("Failed to start transaction in redump DB")?;
         let mut datafile =
             RedumpDatabase::get_datafile_from_db(&transaction, console.to_redump_slug().unwrap())?;
         // get all of the currently stored games
@@ -681,7 +577,7 @@ impl RedumpDatabase {
         let mut processed_games: HashSet<String> = HashSet::new();
         for game in datafile_node.get_tagged_children("game") {
             // get the game's name
-            let game_name: String = game.attr("name").redump("Failed to parse datafile")?;
+            let game_name: String = game.attr("name").catalog("Failed to parse datafile")?;
             // make sure this hasn't been processed already
             if processed_games.contains(&game_name) {
                 return Err(Error::new_original(format!(
@@ -692,12 +588,12 @@ impl RedumpDatabase {
             let mut roms = HashSet::new();
             for rom_element in game.get_tagged_children("rom") {
                 let error_message = format!("Failed to parse datafile (at game \"{game_name}\")");
-                let name: String = rom_element.attr("name").redump(&error_message)?;
+                let name: String = rom_element.attr("name").catalog(&error_message)?;
                 roms.insert(RedumpRom {
                     name: name.replace(game_name.as_str(), "#"),
-                    size: rom_element.attr("size").redump(&error_message)?,
-                    crc: rom_element.attr_hex("crc").redump(&error_message)?,
-                    sha1: rom_element.attr_hex("sha1").redump(&error_message)?,
+                    size: rom_element.attr("size").catalog(&error_message)?,
+                    crc: rom_element.attr_hex("crc").catalog(&error_message)?,
+                    sha1: rom_element.attr_hex("sha1").catalog(&error_message)?,
                 });
             }
             // has this game already been added?
@@ -754,7 +650,7 @@ impl RedumpDatabase {
         RedumpDatabase::update_datafile(&transaction, &datafile)?;
         transaction
             .commit()
-            .redump("Failed to commit changes to redump DB")?;
+            .catalog("Failed to commit changes to redump DB")?;
         // post our stats :D
         let runtime = timer.elapsed().unwrap();
         debug!(

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use log::{LevelFilter, info};
-use ndumplib::redump::RedumpDatabase;
+use ndumplib::catalog::redump::RedumpDatabase;
 use simplelog::{ConfigBuilder, TermLogger};
 
 mod settings;
