@@ -53,23 +53,23 @@ impl<'a, 'input> XMLQueries for Node<'a, 'input> {
     }
 }
 
-impl<'a, 'input> XMLPlainAttribute<String> for Node<'a, 'input> {
-    fn attr(&self, name: &str) -> Result<String, XMLUtilsError> {
+impl<'a, 'input> XMLPlainAttribute<&'a str> for Node<'a, 'input> {
+    fn attr(&self, name: &str) -> Result<&'a str, XMLUtilsError> {
         match self.attribute(name) {
             None => Err(XMLUtilsError(format!(
                 "<{}> element missing attribute \"{}\"",
                 self.tag_name().name(),
                 name
             ))),
-            Some(value) => Ok(value.to_string()),
+            Some(value) => Ok(value),
         }
     }
 }
 
 impl<'a, 'input> XMLPlainAttribute<usize> for Node<'a, 'input> {
     fn attr(&self, name: &str) -> Result<usize, XMLUtilsError> {
-        let value: String = self.attr(name)?;
-        match usize::from_str_radix(value.as_str(), 10) {
+        let value: &'a str = self.attr(name)?;
+        match usize::from_str_radix(value, 10) {
             Ok(value) => Ok(value),
             Err(_) => Err(XMLUtilsError(format!(
                 "<{}> element has invalid \"{}\" attribute: \"{}\" (expected a usize)",
@@ -90,7 +90,7 @@ impl<'a, 'input> XMLHexAttribute<i32> for Node<'a, 'input> {
 
 impl<'a, 'input, const N: usize> XMLHexAttribute<[u8; N]> for Node<'a, 'input> {
     fn attr_hex(&self, name: &str) -> Result<[u8; N], XMLUtilsError> {
-        let value: String = self.attr(name)?;
+        let value: &'a str = self.attr(name)?;
         let mut slice: [u8; N] = [0; N];
         match hex::decode_to_slice(&value, &mut slice) {
             Ok(_) => Ok(slice),

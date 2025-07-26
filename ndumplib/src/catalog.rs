@@ -1,5 +1,7 @@
 use crate::utils::XMLUtilsError;
 
+pub mod logiqx;
+pub mod naming;
 pub mod nointro;
 pub mod redump;
 

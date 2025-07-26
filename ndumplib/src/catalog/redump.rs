@@ -8,12 +8,17 @@ use std::{
 
 use compress_tools::{Ownership, uncompress_archive};
 use log::{debug, info};
-use roxmltree::{Document, ParsingOptions};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{
+    Connection, OptionalExtension, ToSql,
+    types::{FromSql, FromSqlError, ToSqlOutput},
+};
 use tempfile::{NamedTempFile, tempdir};
 
 use crate::{
-    catalog::{Error, Result},
+    catalog::{
+        Error, Result, logiqx,
+        naming::{compress_rom_name, decompress_rom_name},
+    },
     utils::*,
 };
 
@@ -41,29 +46,137 @@ impl GameConsole {
 }
 
 /**
+ * Category
+ */
+enum Category {
+    Games,
+    Demos,
+    Coverdiscs,
+    Applications,
+    Preproduction,
+    Educational,
+    BonusDiscs,
+    Multimedia,
+    Addons,
+    Unknown,
+}
+
+impl From<&str> for Category {
+    fn from(value: &str) -> Self {
+        match value {
+            "Games" => Category::Games,
+            "Demos" => Category::Demos,
+            "Coverdiscs" => Category::Coverdiscs,
+            "Applications" => Category::Applications,
+            "Preproduction" => Category::Preproduction,
+            "Educational" => Category::Educational,
+            "Bonus Discs" => Category::BonusDiscs,
+            "Multimedia" => Category::Multimedia,
+            "Add-Ons" => Category::Addons,
+            _ => Category::Unknown,
+        }
+    }
+}
+impl FromSql for Category {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_i64()? {
+            0 => Ok(Category::Games),
+            1 => Ok(Category::Demos),
+            2 => Ok(Category::Coverdiscs),
+            3 => Ok(Category::Applications),
+            4 => Ok(Category::Preproduction),
+            5 => Ok(Category::Educational),
+            6 => Ok(Category::BonusDiscs),
+            7 => Ok(Category::Multimedia),
+            8 => Ok(Category::Addons),
+            127 => Ok(Category::Unknown),
+            n => Err(FromSqlError::OutOfRange(n)),
+        }
+    }
+}
+impl ToSql for Category {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Owned(rusqlite::types::Value::Integer(
+            match self {
+                Self::Games => 0,
+                Self::Demos => 1,
+                Self::Coverdiscs => 2,
+                Self::Applications => 3,
+                Self::Preproduction => 4,
+                Self::Educational => 5,
+                Self::BonusDiscs => 6,
+                Self::Multimedia => 7,
+                Self::Addons => 8,
+                Self::Unknown => 127,
+            },
+        )))
+    }
+}
+
+/**
  * Internal Types
  */
 #[allow(unused)]
-struct RedumpDatafile {
+struct Datafile {
     dfid: i64,
     console: String,
     version: String,
     last_updated: Duration,
 }
 #[allow(unused)]
-struct RedumpGame {
+#[derive(PartialEq, Eq, Hash)]
+struct ROM {
+    name: String,
+    size: usize,
+    crc32: i32,
+    md5: [u8; 16],
+    sha1: [u8; 20],
+}
+#[allow(unused)]
+struct GameRow {
     dfid: i64,
     gid: i64,
     name: String,
+    category: Category,
     revision: i64,
 }
 #[allow(unused)]
-#[derive(PartialEq, Eq, Hash)]
-struct RedumpRom {
+struct Game {
     name: String,
-    size: usize,
-    crc: i32,
-    sha1: [u8; 20],
+    category: Category,
+    roms: HashSet<ROM>,
+}
+
+impl logiqx::Game for Game {
+    type ROM = ROM;
+
+    fn add_rom(&mut self, rom: Self::ROM) -> Result<()> {
+        self.roms.insert(rom);
+        Ok(())
+    }
+    fn parse_game(node: &roxmltree::Node) -> Result<Self> {
+        let name: &str = node.attr("name").catalog("Failed to parse datafile")?;
+        let category: &str = node
+            .get_tagged_child("category")
+            .catalog("Failed to parse datafile\nMissing <category> in <game>")?
+            .text()
+            .unwrap_or("");
+        Ok(Game {
+            name: name.to_string(),
+            category: Category::from(category),
+            roms: HashSet::new(),
+        })
+    }
+    fn parse_game_rom(node: &roxmltree::Node) -> Result<Self::ROM> {
+        let name: &str = node.attr("name").catalog("Failed to parse datafile")?;
+        Ok(ROM {
+            name: name.to_string(),
+            size: node.attr("size").catalog("Failed to parse datafile")?,
+            crc32: node.attr_hex("crc").catalog("Failed to parse datafile")?,
+            md5: node.attr_hex("md5").catalog("Failed to parse datafile")?,
+            sha1: node.attr_hex("sha1").catalog("Failed to parse datafile")?,
+        })
+    }
 }
 
 /**
@@ -155,6 +268,7 @@ impl RedumpDatabase {
                             "dfid"	INTEGER NOT NULL,
                             "gid"	INTEGER NOT NULL UNIQUE,
                             "name"	TEXT NOT NULL,
+                            "category"	INTEGER NOT NULL,
                             "revision"	INTEGER NOT NULL DEFAULT 0,
                             PRIMARY KEY("gid")
                         )
@@ -173,7 +287,8 @@ impl RedumpDatabase {
                             "gid"	INTEGER NOT NULL,
                             "name"	TEXT NOT NULL,
                             "size"	INTEGER NOT NULL,
-                            "crc"	INTEGER NOT NULL,
+                            "crc32"	INTEGER NOT NULL,
+                            "md5"	BLOB NOT NULL,
                             "sha1"	BLOB NOT NULL
                         )
                     "#,
@@ -312,7 +427,7 @@ impl RedumpDatabase {
     ///
     /// If the given console is not found, a new entry is created.
     ///
-    fn get_datafile_from_db(connection: &impl CanPrepare, console: &str) -> Result<RedumpDatafile> {
+    fn get_datafile_from_db(connection: &impl CanPrepare, console: &str) -> Result<Datafile> {
         // prepare a statement to find the datafile
         let mut statement = connection
             .prepare_cached_common("SELECT * FROM datafiles WHERE console = ?")
@@ -320,7 +435,7 @@ impl RedumpDatabase {
         // parse the result
         let datafile = statement
             .query_one((console,), |row| {
-                Ok(RedumpDatafile {
+                Ok(Datafile {
                     dfid: row.get("dfid").unwrap(),
                     console: row.get("console").unwrap(),
                     version: row.get("version").unwrap(),
@@ -359,10 +474,10 @@ impl RedumpDatabase {
     fn get_games_of_datafile(
         connection: &impl CanPrepare,
         datafile_id: i64,
-    ) -> Result<Vec<RedumpGame>> {
+    ) -> Result<Vec<GameRow>> {
         // prepare a statement to find all of the games
         let mut statement = connection
-            .prepare_cached_common("SELECT gid, name, revision FROM games WHERE dfid = ?")
+            .prepare_cached_common("SELECT gid, category, name, revision FROM games WHERE dfid = ?")
             .catalog("Failed to retrieve games stored in redump DB")?;
         // make the query
         let mut rows = statement
@@ -374,11 +489,12 @@ impl RedumpDatabase {
             .next()
             .catalog("Failed to retrieve games stored in redump DB")?
         {
-            games.push(RedumpGame {
+            games.push(GameRow {
                 dfid: datafile_id,
                 gid: row.get(0).unwrap(),
-                name: row.get(1).unwrap(),
-                revision: row.get(2).unwrap(),
+                category: row.get(1).unwrap(),
+                name: row.get(2).unwrap(),
+                revision: row.get(3).unwrap(),
             });
         }
         // return the games
@@ -387,10 +503,14 @@ impl RedumpDatabase {
 
     /// Get all of the ROM files associated with a game
     ///
-    fn get_redump_roms(connection: &impl CanPrepare, game_id: i64) -> Result<Vec<RedumpRom>> {
+    fn get_redump_roms(
+        connection: &impl CanPrepare,
+        game_id: i64,
+        game_name: &str,
+    ) -> Result<Vec<ROM>> {
         // prepare a statement to find all of the ROMs
         let mut statement = connection
-            .prepare_cached_common("SELECT name, size, crc, sha1 FROM roms WHERE gid = ?")
+            .prepare_cached_common("SELECT name, size, crc32, md5, sha1 FROM roms WHERE gid = ?")
             .catalog("Failed to retrieve game ROMs from redump DB")?;
         // make the query
         let mut rows = statement
@@ -402,11 +522,13 @@ impl RedumpDatabase {
             .next()
             .catalog("Failed to retrieve game ROMs from redump DB")?
         {
-            roms.push(RedumpRom {
-                name: row.get(0).unwrap(),
+            let name: String = row.get(0).unwrap();
+            roms.push(ROM {
+                name: decompress_rom_name(&name, &game_name),
                 size: row.get(1).unwrap(),
-                crc: row.get(2).unwrap(),
-                sha1: row.get(3).unwrap(),
+                crc32: row.get(2).unwrap(),
+                md5: row.get(3).unwrap(),
+                sha1: row.get(4).unwrap(),
             });
         }
         // done :D
@@ -417,18 +539,18 @@ impl RedumpDatabase {
     ///
     /// Returns its game ID
     ///
-    fn insert_new_game(
-        connection: &impl CanPrepare,
-        datafile_id: i64,
-        name: &String,
-    ) -> Result<i64> {
+    fn insert_new_game(connection: &impl CanPrepare, datafile_id: i64, game: &Game) -> Result<i64> {
         // prepare a statement to insert the game into the database
         let mut insert_game_stmt = connection
-            .prepare_cached_common("INSERT INTO games (dfid, name) VALUES (?, ?) RETURNING gid")
+            .prepare_cached_common(
+                "INSERT INTO games (dfid, name, category) VALUES (?, ?, ?) RETURNING gid",
+            )
             .catalog("Failed to update games in redump DB")?;
         // add the game
         insert_game_stmt
-            .query_one((datafile_id, name), |row| Ok(row.get(0).unwrap()))
+            .query_one((datafile_id, &game.name, &game.category), |row| {
+                Ok(row.get(0).unwrap())
+            })
             .catalog("Failed to retrieve games from redump DB")
     }
 
@@ -437,18 +559,20 @@ impl RedumpDatabase {
     fn insert_new_roms<'a>(
         connection: &impl CanPrepare,
         game_id: i64,
-        roms: impl Iterator<Item = &'a RedumpRom>,
+        game_name: &str,
+        roms: impl Iterator<Item = &'a ROM>,
     ) -> Result<()> {
         // prepare a statement for adding ROMs
         let mut statement = connection
             .prepare_cached_common(
-                "INSERT INTO roms (gid, name, size, crc, sha1) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO roms (gid, name, size, crc32, md5, sha1) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .catalog("Failed to update game ROMs in redump DB")?;
         // time to add each ROM
         for rom in roms {
+            let name = compress_rom_name(&rom.name, game_name);
             statement
-                .execute((game_id, &rom.name, rom.size, rom.crc, rom.sha1))
+                .execute((game_id, name, rom.size, rom.crc32, rom.md5, rom.sha1))
                 .catalog("Failed to update game ROMs in redump DB")?;
         }
         // done :D
@@ -487,7 +611,7 @@ impl RedumpDatabase {
 
     /// Updates a datafile's metadata in the database
     ///
-    fn update_datafile(connection: &impl CanPrepare, datafile: &RedumpDatafile) -> Result<()> {
+    fn update_datafile(connection: &impl CanPrepare, datafile: &Datafile) -> Result<()> {
         // prepare a statement to update the datafile
         let mut statement = connection
             .prepare_cached_common(
@@ -530,124 +654,90 @@ impl RedumpDatabase {
     /// Panics if the given console is not indexed by Redump.
     ///
     fn import_datafile(&mut self, console: GameConsole, contents: &String) -> Result<()> {
-        // parse the xml-formatted datafile
         let timer = SystemTime::now();
-        let document = Document::parse_with_options(
-            contents.as_ref(),
-            ParsingOptions {
-                allow_dtd: true,
-                nodes_limit: u32::MAX,
-            },
-        )
-        .catalog("Failed to parse datafile")?;
-        // find the root element
-        let datafile_node = document
-            .root()
-            .get_tagged_child("datafile")
-            .catalog("Failed to parse datafile\nMissing <datafile>")?;
-        // find the version
-        let version = datafile_node
-            .get_tagged_child("header")
-            .catalog("Failed to parse datafile\nMissing <header>")?
-            .get_tagged_child("version")
-            .catalog("Failed to parse datafile\n<header> missing <version>")?
-            .text()
-            .unwrap_or("");
-        // get the in-database datafile metadata
+        let datafile = logiqx::Datafile::open(contents.as_str())?;
+        let header = datafile.parse_header()?;
+        let mut datafile_row = RedumpDatabase::get_datafile_from_db(
+            &self.connection,
+            console.to_redump_slug().unwrap(),
+        )?;
+        if datafile_row.version == header.version {
+            return Ok(());
+        }
         let transaction = self
             .connection
             .transaction()
             .catalog("Failed to start transaction in redump DB")?;
-        let mut datafile =
-            RedumpDatabase::get_datafile_from_db(&transaction, console.to_redump_slug().unwrap())?;
-        // get all of the currently stored games
         let mut stored_games: HashMap<String, i64> = {
-            let games = RedumpDatabase::get_games_of_datafile(&transaction, datafile.dfid)?;
-            let mut map = HashMap::with_capacity(games.len());
+            let games = RedumpDatabase::get_games_of_datafile(&transaction, datafile_row.dfid)?;
+            let mut map: HashMap<String, i64> = HashMap::with_capacity(games.len());
             for game in games {
                 map.insert(game.name, game.gid);
             }
             map
         };
         debug!("Previously stored games: {}", stored_games.len());
-        // iterate over every game
         let mut unchanged_entries: usize = 0;
         let mut changed_entries: usize = 0;
         let mut new_entries: usize = 0;
         let mut processed_games: HashSet<String> = HashSet::new();
-        for game in datafile_node.get_tagged_children("game") {
-            // get the game's name
-            let game_name: String = game.attr("name").catalog("Failed to parse datafile")?;
-            // make sure this hasn't been processed already
-            if processed_games.contains(&game_name) {
+        for game in datafile.parse_games::<Game>()? {
+            if processed_games.contains(&game.name) {
                 return Err(Error::new_original(format!(
-                    "Failed to parse datafile\nDuplicate games were found: \"{game_name}\"",
+                    "Failed to parse datafile\nDuplicate games were found: \"{}\"",
+                    game.name
                 )));
             }
-            // get the game's ROMs
-            let mut roms = HashSet::new();
-            for rom_element in game.get_tagged_children("rom") {
-                let error_message = format!("Failed to parse datafile (at game \"{game_name}\")");
-                let name: String = rom_element.attr("name").catalog(&error_message)?;
-                roms.insert(RedumpRom {
-                    name: name.replace(game_name.as_str(), "#"),
-                    size: rom_element.attr("size").catalog(&error_message)?,
-                    crc: rom_element.attr_hex("crc").catalog(&error_message)?,
-                    sha1: rom_element.attr_hex("sha1").catalog(&error_message)?,
-                });
-            }
-            // has this game already been added?
-            if let Some(gid) = stored_games.get(&game_name) {
+            if let Some(gid) = stored_games.get(&game.name) {
                 let gid = gid.clone();
-                // check that the ROMs are equal
                 let roms_equal = 'are_roms_equal: {
-                    let stored_roms = RedumpDatabase::get_redump_roms(&transaction, gid)?;
-                    if stored_roms.len() != roms.len() {
+                    let stored_roms =
+                        RedumpDatabase::get_redump_roms(&transaction, gid, &game.name)?;
+                    if stored_roms.len() != game.roms.len() {
                         break 'are_roms_equal false;
                     }
                     for rom in stored_roms {
-                        if !roms.contains(&rom) {
+                        if !game.roms.contains(&rom) {
                             break 'are_roms_equal false;
                         }
                     }
                     true
                 };
-                // if the ROMs are equal, we don't have to do anything
-                // if it does, there are many things to do
                 if roms_equal {
                     unchanged_entries += 1;
                 } else {
                     changed_entries += 1;
                     RedumpDatabase::remove_game_roms(&transaction, gid)?;
-                    RedumpDatabase::insert_new_roms(&transaction, gid, roms.iter())?;
+                    RedumpDatabase::insert_new_roms(
+                        &transaction,
+                        gid,
+                        &game.name,
+                        game.roms.iter(),
+                    )?;
                     RedumpDatabase::bump_game_revision(&transaction, gid)?;
                 }
-                // remove the name-id+rev mapping. this will be useful later
-                stored_games.remove(&game_name);
+                stored_games.remove(&game.name);
             } else {
                 new_entries += 1;
                 RedumpDatabase::insert_new_roms(
                     &transaction,
-                    RedumpDatabase::insert_new_game(&transaction, datafile.dfid, &game_name)?,
-                    roms.iter(),
+                    RedumpDatabase::insert_new_game(&transaction, datafile_row.dfid, &game)?,
+                    &game.name,
+                    game.roms.iter(),
                 )?;
             }
-            // update sets/maps
-            processed_games.insert(game_name.to_string());
+            processed_games.insert(game.name);
         }
-        // processed_games is no longer needed
         drop(processed_games);
-        // in the loop, we were deleting entries from stored_games
         // by this point, only games which exist in the database but not in this datafile will remain
-        // we must remove these
         let removed_games = stored_games.len();
         for (_, gid) in stored_games {
             RedumpDatabase::remove_game(&transaction, gid)?;
         }
         // update the version and last updated field within the database
-        datafile.version = version.to_string();
-        datafile.last_updated = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        RedumpDatabase::update_datafile(&transaction, &datafile)?;
+        datafile_row.version = header.version.to_string();
+        datafile_row.last_updated = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        RedumpDatabase::update_datafile(&transaction, &datafile_row)?;
         transaction
             .commit()
             .catalog("Failed to commit changes to redump DB")?;
