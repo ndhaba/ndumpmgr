@@ -1,5 +1,6 @@
 use roxmltree::Node;
 use rusqlite::{CachedStatement, Connection, Transaction};
+use ureq::{Body, http::Response};
 
 #[derive(Debug)]
 pub(crate) struct XMLUtilsError(String);
@@ -141,5 +142,33 @@ impl<T> ResultUtils<T> for std::option::Option<T> {
             Some(v) => Ok(v),
             None => Err(crate::catalog::Error::new_original(message)),
         }
+    }
+}
+
+pub(crate) trait ResponseUtils {
+    fn content_type(&self) -> String;
+    fn content_length(&self) -> usize;
+}
+
+impl ResponseUtils for Response<Body> {
+    fn content_type(&self) -> String {
+        self.headers()
+            .get("Content-Type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(";")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+    fn content_length(&self) -> usize {
+        self.headers()
+            .get("Content-Length")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 }

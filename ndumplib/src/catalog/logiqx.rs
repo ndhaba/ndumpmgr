@@ -10,7 +10,7 @@ pub(crate) struct Header<'a> {
     pub homepage: &'a str,
 }
 
-pub(crate) trait Game
+pub(crate) trait GameElement
 where
     Self: Sized,
 {
@@ -81,7 +81,7 @@ impl<'a> Datafile<'a> {
 
     pub fn parse_games<T>(&self) -> Result<Vec<T>>
     where
-        T: Game,
+        T: GameElement,
     {
         let mut games = Vec::new();
         for game_element in self.root()?.get_tagged_children("game") {
