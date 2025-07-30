@@ -9,11 +9,38 @@ use compress_tools::uncompress_archive;
 use log::debug;
 use regex::Regex;
 use tempfile::{NamedTempFile, TempDir};
-use ureq::{Agent, ResponseExt};
+use ureq::{Agent, Body, ResponseExt, http::Response};
 use visdom::{Vis, types::Elements};
 
-use super::{Error, Result};
-use crate::{GameConsole, utils::*};
+use super::{Error, Result, ResultUtils};
+use crate::GameConsole;
+
+trait ResponseUtils {
+    fn content_type(&self) -> String;
+    fn content_length(&self) -> usize;
+}
+impl ResponseUtils for Response<Body> {
+    fn content_type(&self) -> String {
+        self.headers()
+            .get("Content-Type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(";")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+    fn content_length(&self) -> usize {
+        self.headers()
+            .get("Content-Length")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+}
 
 #[allow(unused)]
 pub(super) struct DatafileLink {

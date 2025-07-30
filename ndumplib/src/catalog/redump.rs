@@ -7,8 +7,8 @@ use compress_tools::{Ownership, uncompress_archive};
 use log::debug;
 use tempfile::{NamedTempFile, tempdir};
 
-use super::{Error, Result};
-use crate::{GameConsole, utils::*};
+use super::{Error, Result, ResultUtils};
+use crate::GameConsole;
 
 impl GameConsole {
     pub(super) fn redump_datafile_name(&self) -> Option<&str> {
@@ -25,7 +25,6 @@ impl GameConsole {
             _ => None,
         }
     }
-
     pub(super) fn redump_slug(&self) -> Option<&str> {
         match self {
             Self::Dreamcast => Some("dc"),

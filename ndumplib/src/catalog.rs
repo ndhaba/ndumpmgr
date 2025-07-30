@@ -6,6 +6,7 @@ use std::{
 
 use chrono::{DateTime, TimeDelta, Utc};
 use log::{debug, info};
+use logiqx::*;
 use rusqlite::{
     Connection, OptionalExtension, ToSql,
     types::{FromSql, FromSqlError, ToSqlOutput},
@@ -63,7 +64,7 @@ impl From<roxmltree::Error> for InnerError {
         Self::XMLError(error)
     }
 }
-impl From<XMLUtilsError> for InnerError {
+impl From<logiqx::XMLUtilsError> for InnerError {
     fn from(value: XMLUtilsError) -> Self {
         Self::XMLUtilsError(value)
     }
@@ -105,6 +106,27 @@ impl Error {
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+#[doc(hidden)]
+trait ResultUtils<T> {
+    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T>;
+}
+impl<T, E: Into<crate::catalog::InnerError>> ResultUtils<T> for std::result::Result<T, E> {
+    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T> {
+        match self {
+            Ok(v) => Ok(v),
+            Err(e) => Err(crate::catalog::Error::new(message, e)),
+        }
+    }
+}
+impl<T> ResultUtils<T> for std::option::Option<T> {
+    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T> {
+        match self {
+            Some(v) => Ok(v),
+            None => Err(crate::catalog::Error::new_original(message)),
+        }
+    }
+}
 
 fn decompress_rom_name(rom_name: &str, game_name: &str) -> String {
     if rom_name == "$c" {
@@ -793,7 +815,7 @@ impl Catalog {
     fn import_datafile_games<'a>(
         &mut self,
         datafile: &Datafile,
-        xml: logiqx::Datafile<'a>,
+        xml: XMLDatafile<'a>,
     ) -> Result<()> {
         let transaction = self
             .connection
@@ -890,7 +912,7 @@ impl Catalog {
             None => return Ok(()),
         };
         let content = nointro::download_datafile(agent, url)?;
-        let xml = logiqx::Datafile::open(&content)?;
+        let xml = logiqx::XMLDatafile::open(&content)?;
         let header = xml.parse_header()?;
         datafile.version = header.version.to_string();
         self.import_datafile_games(&datafile, xml)?;
@@ -912,7 +934,7 @@ impl Catalog {
             return Ok(());
         }
         let content = redump::download_datafile(console.redump_slug().unwrap())?;
-        let xml = logiqx::Datafile::open(&content)?;
+        let xml = logiqx::XMLDatafile::open(&content)?;
         let header = xml.parse_header()?;
         if datafile.version == header.version {
             datafile.last_updated = Utc::now();
