@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod convert;
 pub(crate) mod utils;
 
 #[derive(Clone, Copy)]
