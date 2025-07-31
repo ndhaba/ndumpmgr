@@ -7,8 +7,7 @@ use compress_tools::{Ownership, uncompress_archive};
 use log::debug;
 use tempfile::{NamedTempFile, tempdir};
 
-use super::{Error, Result, ResultUtils};
-use crate::GameConsole;
+use crate::{Error, GameConsole, Result, ResultUtils};
 
 impl GameConsole {
     pub(super) fn redump_datafile_name(&self) -> Option<&str> {
@@ -44,18 +43,17 @@ impl GameConsole {
 pub(super) fn download_datafile(slug: &str) -> Result<String> {
     let url: String = format!("http://redump.org/datfile/{slug}/");
     let zip_file = NamedTempFile::with_suffix(".zip")
-        .catalog("Failed to create temporary file to download datafile")?;
-    let extracted_files =
-        tempdir().catalog("Failed to create directory file to extract datafile")?;
+        .ndl("Failed to create temporary file to download datafile")?;
+    let extracted_files = tempdir().ndl("Failed to create directory file to extract datafile")?;
     {
-        let mut response = ureq::get(url).call().catalog("Failed to start download")?;
+        let mut response = ureq::get(url).call().ndl("Failed to start download")?;
         let file = zip_file
             .as_file()
             .try_clone()
-            .catalog("Failed to save download")?;
+            .ndl("Failed to save download")?;
         let mut writer = BufWriter::new(file);
         std::io::copy(&mut response.body_mut().as_reader(), &mut writer)
-            .catalog("Failed to save datafile")?;
+            .ndl("Failed to save datafile")?;
         debug!(
             "Downloaded zipped datafile to \"{}\"",
             zip_file.path().to_str().unwrap()
@@ -66,7 +64,7 @@ pub(super) fn download_datafile(slug: &str) -> Result<String> {
         extracted_files.path(),
         Ownership::Ignore,
     )
-    .catalog("Failed to extract zip")?;
+    .ndl("Failed to extract zip")?;
     debug!(
         "Extracted zipped datafile to \"{}\"",
         extracted_files.path().to_str().unwrap()
@@ -75,12 +73,12 @@ pub(super) fn download_datafile(slug: &str) -> Result<String> {
         for file in extracted_files
             .path()
             .read_dir()
-            .catalog("Failed to find downloaded datafile")?
+            .ndl("Failed to find downloaded datafile")?
         {
-            let path = file.catalog("Failed to find downloaded datafile")?.path();
+            let path = file.ndl("Failed to find downloaded datafile")?.path();
             if let Some(extension) = path.extension() {
                 if extension == "dat" {
-                    break 'file_find File::open(path).catalog("Failed to open datafile")?;
+                    break 'file_find File::open(path).ndl("Failed to open datafile")?;
                 }
             }
         }
@@ -90,6 +88,6 @@ pub(super) fn download_datafile(slug: &str) -> Result<String> {
     };
     let mut contents = String::new();
     file.read_to_string(&mut contents)
-        .catalog("Failed to read datafile")?;
+        .ndl("Failed to read datafile")?;
     Ok(contents)
 }

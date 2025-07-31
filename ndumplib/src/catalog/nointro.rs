@@ -12,8 +12,7 @@ use tempfile::{NamedTempFile, TempDir};
 use ureq::{Agent, Body, ResponseExt, http::Response};
 use visdom::{Vis, types::Elements};
 
-use super::{Error, Result, ResultUtils};
-use crate::GameConsole;
+use crate::{Error, GameConsole, Result, ResultUtils};
 
 trait ResponseUtils {
     fn content_type(&self) -> String;
@@ -62,7 +61,7 @@ fn load_html<'a>(
                 "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
             )
             .send_form(body)
-            .catalog("Failed to connect to No-Intro")?,
+            .ndl("Failed to connect to No-Intro")?,
         None => agent
             .get(url)
             .header(
@@ -70,7 +69,7 @@ fn load_html<'a>(
                 "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
             )
             .call()
-            .catalog("Failed to connect to No-Intro")?,
+            .ndl("Failed to connect to No-Intro")?,
     };
     if !response.status().is_success() {
         return Err(Error::new_original(format!(
@@ -87,9 +86,9 @@ fn load_html<'a>(
         response
             .body_mut()
             .read_to_string()
-            .catalog("Failed to connect to No-Intro")?,
+            .ndl("Failed to connect to No-Intro")?,
     )
-    .catalog("Failed to connect to No-Intro")?;
+    .ndl("Failed to connect to No-Intro")?;
     Ok((elements, response.get_uri().to_string()))
 }
 
@@ -104,7 +103,7 @@ fn get_form_data(form: &Elements, submit_selector: &str) -> Result<HashMap<Strin
     for select in form.find("select") {
         let name = select
             .get_attribute("name")
-            .catalog("Failed to download No-Intro datafile")?
+            .ndl("Failed to download No-Intro datafile")?
             .to_string();
         let selected_option = select.children().filter("option[selected]");
         if selected_option.length() == 0 {
@@ -118,18 +117,18 @@ fn get_form_data(form: &Elements, submit_selector: &str) -> Result<HashMap<Strin
         }
         let value = selected_option
             .attr("value")
-            .catalog("Failed to download No-Intro datafile")?
+            .ndl("Failed to download No-Intro datafile")?
             .to_string();
         form_data.insert(name, value);
     }
     for checked_item in form.find("input[checked]") {
         let name = checked_item
             .get_attribute("name")
-            .catalog("Failed to download No-Intro datafile")?
+            .ndl("Failed to download No-Intro datafile")?
             .to_string();
         let value = checked_item
             .get_attribute("value")
-            .catalog("Failed to download No-Intro datafile")?
+            .ndl("Failed to download No-Intro datafile")?
             .to_string();
         form_data.insert(name, value);
     }
@@ -143,11 +142,11 @@ fn get_form_data(form: &Elements, submit_selector: &str) -> Result<HashMap<Strin
     for submit_button in submit_buttons {
         let name = submit_button
             .get_attribute("name")
-            .catalog("Failed to download No-Intro datafile")?
+            .ndl("Failed to download No-Intro datafile")?
             .to_string();
         let value = submit_button
             .get_attribute("value")
-            .catalog("Failed to download No-Intro datafile")?
+            .ndl("Failed to download No-Intro datafile")?
             .to_string();
         form_data.insert(name, value);
     }
@@ -156,7 +155,7 @@ fn get_form_data(form: &Elements, submit_selector: &str) -> Result<HashMap<Strin
 
 fn download_datafile_zip(agent: &Agent, link: &str) -> Result<NamedTempFile> {
     let mut file =
-        NamedTempFile::with_suffix(".zip").catalog("Failed to download No-Intro datafile")?;
+        NamedTempFile::with_suffix(".zip").ndl("Failed to download No-Intro datafile")?;
     // go to the datafile configuration settings
     let (root, url) = load_html(agent, link, None)?;
     // prepare the datafile
@@ -177,7 +176,7 @@ fn download_datafile_zip(agent: &Agent, link: &str) -> Result<NamedTempFile> {
             "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
         )
         .send_form(form_data)
-        .catalog("Failed to download No-Intro datafile")?;
+        .ndl("Failed to download No-Intro datafile")?;
     if response.content_type() != "application/zip" {
         return Err(Error::new_original(format!(
             "Failed to download No-Intro datafile\nExpected \"application/json\" response, got {}",
@@ -190,20 +189,20 @@ fn download_datafile_zip(agent: &Agent, link: &str) -> Result<NamedTempFile> {
     let mut bytes = Vec::with_capacity(len);
     body.as_reader()
         .read_to_end(&mut bytes)
-        .catalog("Failed to download No-Intro datafile")?;
+        .ndl("Failed to download No-Intro datafile")?;
     file.write(&bytes)
-        .catalog("Failed to download No-Intro datafile")?;
+        .ndl("Failed to download No-Intro datafile")?;
     Ok(file)
 }
 
 fn extract_datafile(file: &NamedTempFile) -> Result<String> {
-    let folder = TempDir::new().catalog("Failed to extract zip")?;
+    let folder = TempDir::new().ndl("Failed to extract zip")?;
     uncompress_archive(
         BufReader::new(file),
         folder.path(),
         compress_tools::Ownership::Ignore,
     )
-    .catalog("Failed to extract zip")?;
+    .ndl("Failed to extract zip")?;
     debug!(
         "Extracted zipped datafile to \"{}\"",
         folder.path().to_str().unwrap()
@@ -212,12 +211,12 @@ fn extract_datafile(file: &NamedTempFile) -> Result<String> {
         for file in folder
             .path()
             .read_dir()
-            .catalog("Failed to find downloaded datafile")?
+            .ndl("Failed to find downloaded datafile")?
         {
-            let path = file.catalog("Failed to find downloaded datafile")?.path();
+            let path = file.ndl("Failed to find downloaded datafile")?.path();
             if let Some(extension) = path.extension() {
                 if extension == "dat" {
-                    break 'file_find File::open(path).catalog("Failed to open datafile")?;
+                    break 'file_find File::open(path).ndl("Failed to open datafile")?;
                 }
             }
         }
@@ -227,7 +226,7 @@ fn extract_datafile(file: &NamedTempFile) -> Result<String> {
     };
     let mut contents = String::new();
     file.read_to_string(&mut contents)
-        .catalog("Failed to read datafile")?;
+        .ndl("Failed to read datafile")?;
     Ok(contents)
 }
 
@@ -267,7 +266,7 @@ pub(super) fn load_datafile_links(agent: &Agent) -> Result<HashMap<String, Dataf
                         Some(format!(
                             "https://datomatic.no-intro.org/{}",
                             a.attr("href")
-                                .catalog("Failed to load No-Intro datafile status\nMissing link")?
+                                .ndl("Failed to load No-Intro datafile status\nMissing link")?
                                 .to_string()
                         ))
                     } else {

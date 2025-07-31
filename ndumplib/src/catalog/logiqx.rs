@@ -1,15 +1,7 @@
+use crate::Error;
+
 use super::ResultUtils;
 use roxmltree::{Document, Node, ParsingOptions};
-
-#[derive(Debug)]
-pub(crate) struct XMLUtilsError(String);
-
-impl std::fmt::Display for XMLUtilsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-impl std::error::Error for XMLUtilsError {}
 
 pub(crate) trait XMLQueries {
     fn get_tagged_child(&self, tag_name: &str) -> Option<Self>
@@ -21,10 +13,10 @@ pub(crate) trait XMLQueries {
         Self: Sized;
 }
 pub(crate) trait XMLPlainAttribute<T> {
-    fn attr(&self, name: &str) -> Result<T, XMLUtilsError>;
+    fn attr(&self, name: &str) -> Result<T, Error>;
 }
 pub(crate) trait XMLHexAttribute<T> {
-    fn attr_hex(&self, name: &str) -> Result<T, XMLUtilsError>;
+    fn attr_hex(&self, name: &str) -> Result<T, Error>;
 }
 
 impl<'a, 'input> XMLQueries for Node<'a, 'input> {
@@ -50,9 +42,9 @@ impl<'a, 'input> XMLQueries for Node<'a, 'input> {
     }
 }
 impl<'a, 'input> XMLPlainAttribute<&'a str> for Node<'a, 'input> {
-    fn attr(&self, name: &str) -> Result<&'a str, XMLUtilsError> {
+    fn attr(&self, name: &str) -> Result<&'a str, Error> {
         match self.attribute(name) {
-            None => Err(XMLUtilsError(format!(
+            None => Err(Error::new_original(format!(
                 "<{}> element missing attribute \"{}\"",
                 self.tag_name().name(),
                 name
@@ -62,11 +54,11 @@ impl<'a, 'input> XMLPlainAttribute<&'a str> for Node<'a, 'input> {
     }
 }
 impl<'a, 'input> XMLPlainAttribute<usize> for Node<'a, 'input> {
-    fn attr(&self, name: &str) -> Result<usize, XMLUtilsError> {
+    fn attr(&self, name: &str) -> Result<usize, Error> {
         let value: &'a str = self.attr(name)?;
         match usize::from_str_radix(value, 10) {
             Ok(value) => Ok(value),
-            Err(_) => Err(XMLUtilsError(format!(
+            Err(_) => Err(Error::new_original(format!(
                 "<{}> element has invalid \"{}\" attribute: \"{}\" (expected a usize)",
                 self.tag_name().name(),
                 name,
@@ -76,18 +68,18 @@ impl<'a, 'input> XMLPlainAttribute<usize> for Node<'a, 'input> {
     }
 }
 impl<'a, 'input> XMLHexAttribute<i32> for Node<'a, 'input> {
-    fn attr_hex(&self, name: &str) -> Result<i32, XMLUtilsError> {
+    fn attr_hex(&self, name: &str) -> Result<i32, Error> {
         let buffer: [u8; 4] = self.attr_hex(name)?;
         Ok(i32::from_be_bytes(buffer))
     }
 }
 impl<'a, 'input, const N: usize> XMLHexAttribute<[u8; N]> for Node<'a, 'input> {
-    fn attr_hex(&self, name: &str) -> Result<[u8; N], XMLUtilsError> {
+    fn attr_hex(&self, name: &str) -> Result<[u8; N], Error> {
         let value: &'a str = self.attr(name)?;
         let mut slice: [u8; N] = [0; N];
         match hex::decode_to_slice(&value, &mut slice) {
             Ok(_) => Ok(slice),
-            Err(_) => Err(XMLUtilsError(format!(
+            Err(_) => Err(Error::new_original(format!(
                 "<{}> element has invalid \"{}\" attribute: \"{}\" (expected {}-bit hex)",
                 self.tag_name().name(),
                 name,
@@ -131,7 +123,7 @@ impl<'a> XMLDatafile<'a> {
                     nodes_limit: u32::MAX,
                 },
             )
-            .catalog("Failed to parse logiqx datafile")?,
+            .ndl("Failed to parse logiqx datafile")?,
         })
     }
 
@@ -139,32 +131,32 @@ impl<'a> XMLDatafile<'a> {
         self.document
             .root()
             .get_tagged_child("datafile")
-            .catalog("Failed to parse datafile\nMissing <datafile>")
+            .ndl("Failed to parse datafile\nMissing <datafile>")
     }
 
     pub fn parse_header(&'a self) -> super::Result<Header<'a>> {
         let header = self
             .root()?
             .get_tagged_child("header")
-            .catalog("Failed to parse datafile\nMissing <header>")?;
+            .ndl("Failed to parse datafile\nMissing <header>")?;
         let name = header
             .get_tagged_child("name")
-            .catalog("Failed to parse datafile\nMissing <name> in <header>")?
+            .ndl("Failed to parse datafile\nMissing <name> in <header>")?
             .text()
             .unwrap_or("");
         let description = header
             .get_tagged_child("description")
-            .catalog("Failed to parse datafile\nMissing <description> in <header>")?
+            .ndl("Failed to parse datafile\nMissing <description> in <header>")?
             .text()
             .unwrap_or("");
         let version = header
             .get_tagged_child("version")
-            .catalog("Failed to parse datafile\nMissing <version> in <header>")?
+            .ndl("Failed to parse datafile\nMissing <version> in <header>")?
             .text()
             .unwrap_or("");
         let homepage = header
             .get_tagged_child("homepage")
-            .catalog("Failed to parse datafile\nMissing <homepage> in <header>")?
+            .ndl("Failed to parse datafile\nMissing <homepage> in <header>")?
             .text()
             .unwrap_or("");
         Ok(Header {

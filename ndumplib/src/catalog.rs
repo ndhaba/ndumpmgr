@@ -13,120 +13,11 @@ use rusqlite::{
 };
 use ureq::{Agent, agent};
 
-use crate::{GameConsole, catalog::logiqx::GameElement, utils::*};
+use crate::{Error, GameConsole, Result, ResultUtils, catalog::logiqx::GameElement, utils::*};
 
 mod logiqx;
 mod nointro;
 mod redump;
-
-#[derive(Debug)]
-pub(crate) enum InnerError {
-    IOError(std::io::Error),
-    NetError(ureq::Error),
-    ArchiveError(compress_tools::Error),
-    XMLError(roxmltree::Error),
-    XMLUtilsError(XMLUtilsError),
-    SQLiteError(rusqlite::Error),
-    UnknownError(visdom::types::BoxDynError),
-}
-
-impl std::fmt::Display for InnerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IOError(e) => write!(f, "I/O Error: {e}"),
-            Self::NetError(e) => write!(f, "Network Error: {e}"),
-            Self::ArchiveError(e) => write!(f, "Archive Error: {e}"),
-            Self::XMLError(e) => write!(f, "XML Error: {e}"),
-            Self::XMLUtilsError(e) => write!(f, "{e}"),
-            Self::SQLiteError(e) => write!(f, "SQLite Error: {e}"),
-            Self::UnknownError(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl From<std::io::Error> for InnerError {
-    fn from(error: std::io::Error) -> Self {
-        Self::IOError(error)
-    }
-}
-impl From<ureq::Error> for InnerError {
-    fn from(error: ureq::Error) -> Self {
-        Self::NetError(error)
-    }
-}
-impl From<compress_tools::Error> for InnerError {
-    fn from(error: compress_tools::Error) -> Self {
-        Self::ArchiveError(error)
-    }
-}
-impl From<roxmltree::Error> for InnerError {
-    fn from(error: roxmltree::Error) -> Self {
-        Self::XMLError(error)
-    }
-}
-impl From<logiqx::XMLUtilsError> for InnerError {
-    fn from(value: XMLUtilsError) -> Self {
-        Self::XMLUtilsError(value)
-    }
-}
-impl From<rusqlite::Error> for InnerError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::SQLiteError(error)
-    }
-}
-impl From<visdom::types::BoxDynError> for InnerError {
-    fn from(value: visdom::types::BoxDynError) -> Self {
-        Self::UnknownError(value)
-    }
-}
-
-#[derive(Debug)]
-pub struct Error(String, Option<InnerError>);
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error(str, Some(err)) => write!(f, "{str}\n{err}"),
-            Error(str, None) => write!(f, "{str}"),
-        }
-    }
-}
-impl std::error::Error for Error {}
-impl Error {
-    /// Creates a new [Error] with the given message and internal error
-    ///
-    pub(crate) fn new<S: AsRef<str>, E: Into<InnerError>>(message: S, error: E) -> Error {
-        Error(message.as_ref().to_string(), Some(error.into()))
-    }
-    /// Creates a new [Error] without a separate internal error
-    ///
-    pub(crate) fn new_original<S: AsRef<str>>(message: S) -> Error {
-        Error(message.as_ref().to_string(), None)
-    }
-}
-
-pub(crate) type Result<T> = std::result::Result<T, Error>;
-
-#[doc(hidden)]
-trait ResultUtils<T> {
-    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T>;
-}
-impl<T, E: Into<crate::catalog::InnerError>> ResultUtils<T> for std::result::Result<T, E> {
-    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T> {
-        match self {
-            Ok(v) => Ok(v),
-            Err(e) => Err(crate::catalog::Error::new(message, e)),
-        }
-    }
-}
-impl<T> ResultUtils<T> for std::option::Option<T> {
-    fn catalog<S: AsRef<str>>(self, message: S) -> crate::catalog::Result<T> {
-        match self {
-            Some(v) => Ok(v),
-            None => Err(crate::catalog::Error::new_original(message)),
-        }
-    }
-}
 
 fn decompress_rom_name(rom_name: &str, game_name: &str) -> String {
     if rom_name == "$c" {
@@ -327,7 +218,7 @@ impl GameElement for Game {
         Ok(())
     }
     fn parse_game(node: &roxmltree::Node) -> Result<Self> {
-        let name: &str = node.attr("name").catalog("Failed to parse datafile")?;
+        let name: &str = node.attr("name")?;
         let mut game = Game {
             dfid: -1,
             gid: None,
@@ -343,26 +234,23 @@ impl GameElement for Game {
         Ok(game)
     }
     fn parse_game_rom(node: &roxmltree::Node) -> Result<Self::ROM> {
-        let name: &str = node.attr("name").catalog("Failed to parse datafile")?;
+        let name: &str = node.attr("name")?;
         Ok(ROM {
             name: name.to_string(),
             status: if node.has_attribute("status") {
                 Some({
-                    let str: &str = node.attr("status").catalog("Failed to parse datafile")?;
+                    let str: &str = node.attr("status")?;
                     str.into()
                 })
             } else {
                 None
             },
-            size: node.attr("size").catalog("Failed to parse datafile")?,
-            crc32: node.attr_hex("crc").catalog("Failed to parse datafile")?,
-            md5: node.attr_hex("md5").catalog("Failed to parse datafile")?,
-            sha1: node.attr_hex("sha1").catalog("Failed to parse datafile")?,
+            size: node.attr("size")?,
+            crc32: node.attr_hex("crc")?,
+            md5: node.attr_hex("md5")?,
+            sha1: node.attr_hex("sha1")?,
             sha256: if node.has_attribute("sha256") {
-                Some(
-                    node.attr_hex("sha256")
-                        .catalog("Failed to parse datafile")?,
-                )
+                Some(node.attr_hex("sha256")?)
             } else {
                 None
             },
@@ -373,56 +261,56 @@ impl Game {
     fn delete(&self, connection: &impl CanPrepare) -> Result<()> {
         let mut statement = connection
             .prepare_cached_common("DELETE FROM games WHERE gid = ?")
-            .catalog("Failed to update games in catalog DB")?;
+            .ndl("Failed to update games in catalog DB")?;
         statement
             .execute((self.gid.unwrap(),))
-            .catalog("Failed to update games in catalog DB")?;
+            .ndl("Failed to update games in catalog DB")?;
         let mut statement = connection
             .prepare_cached_common("DELETE FROM game_categories WHERE gid = ?")
-            .catalog("Failed to update game categories in catalog DB")?;
+            .ndl("Failed to update game categories in catalog DB")?;
         statement
             .execute((self.gid.unwrap(),))
-            .catalog("Failed to update game ROMs in catalog DB")?;
+            .ndl("Failed to update game ROMs in catalog DB")?;
         let mut statement = connection
             .prepare_cached_common("DELETE FROM roms WHERE gid = ?")
-            .catalog("Failed to update game ROMs in catalog DB")?;
+            .ndl("Failed to update game ROMs in catalog DB")?;
         statement
             .execute((self.gid.unwrap(),))
-            .catalog("Failed to update game ROMs in catalog DB")?;
+            .ndl("Failed to update game ROMs in catalog DB")?;
         Ok(())
     }
     fn insert_categories(&self, connection: &impl CanPrepare) -> Result<()> {
         let mut statement = connection
             .prepare_cached_common("INSERT INTO game_categories (gid, category) VALUES (?, ?)")
-            .catalog("Failed to add game category to catalog DB")?;
+            .ndl("Failed to add game category to catalog DB")?;
         for category in &self.categories {
             statement
                 .execute((self.gid.unwrap(), category))
-                .catalog("Failed to add game category to catalog DB")?;
+                .ndl("Failed to add game category to catalog DB")?;
         }
         Ok(())
     }
     fn insert_roms(&self, connection: &impl CanPrepare) -> Result<()> {
         let mut statement = connection
             .prepare_cached_common("INSERT INTO roms (gid, name, status, size, crc32, md5, sha1, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-            .catalog("Failed to add ROMs to catalog DB")?;
+            .ndl("Failed to add ROMs to catalog DB")?;
         for rom in &self.roms {
             let name = compress_rom_name(&rom.name, &self.name);
             statement
                 .execute((
                     self.gid, &name, rom.status, rom.size, rom.crc32, rom.md5, rom.sha1, rom.sha256,
                 ))
-                .catalog("Failed to add ROMs to catalog DB")?;
+                .ndl("Failed to add ROMs to catalog DB")?;
         }
         Ok(())
     }
     fn insert(&mut self, connection: &impl CanPrepare) -> Result<()> {
         let mut insert_game_stmt = connection
             .prepare_cached_common("INSERT INTO games (dfid, name) VALUES (?, ?) RETURNING gid")
-            .catalog("Failed to add game to catalog DB")?;
+            .ndl("Failed to add game to catalog DB")?;
         let gid: i64 = insert_game_stmt
             .query_one((self.dfid, &self.name), |row| Ok(row.get(0).unwrap()))
-            .catalog("Failed to add game to catalog DB")?;
+            .ndl("Failed to add game to catalog DB")?;
         self.gid = Some(gid);
         self.revision = 0;
         self.insert_categories(connection)?;
@@ -435,19 +323,19 @@ impl Game {
         }
         let mut get_categories_stmt = connection
             .prepare_cached_common("SELECT category FROM game_categories WHERE gid = ?")
-            .catalog("Failed to retreive game categories from catalog DB")?;
+            .ndl("Failed to retreive game categories from catalog DB")?;
         let categories = get_categories_stmt
             .query_map((self.gid.unwrap(),), |row| Ok(row.get(0).unwrap()))
-            .catalog("Failed to retrieve game categories from catalog DB")?;
+            .ndl("Failed to retrieve game categories from catalog DB")?;
         for category in categories {
             self.categories
-                .insert(category.catalog("Failed to retrieve game categories from catalog DB")?);
+                .insert(category.ndl("Failed to retrieve game categories from catalog DB")?);
         }
         let mut get_roms_stmt = connection
             .prepare_cached_common(
                 "SELECT name, status, size, crc32, md5, sha1, sha256 FROM roms WHERE gid = ?",
             )
-            .catalog("Failed to retrieve ROMs from catalog DB")?;
+            .ndl("Failed to retrieve ROMs from catalog DB")?;
         let roms = get_roms_stmt
             .query_map((self.gid.unwrap(),), |row| {
                 let name: String = row.get(0).unwrap();
@@ -461,10 +349,10 @@ impl Game {
                     sha256: row.get(6).unwrap(),
                 })
             })
-            .catalog("Failed to retrieve ROMs from catalog DB")?;
+            .ndl("Failed to retrieve ROMs from catalog DB")?;
         for rom in roms {
             self.roms
-                .insert(rom.catalog("Failed to retrieve ROMs from catalog DB")?);
+                .insert(rom.ndl("Failed to retrieve ROMs from catalog DB")?);
         }
         self.loaded = true;
         Ok(())
@@ -486,10 +374,10 @@ impl Game {
             if self.categories.len() != 0 {
                 let mut statement = connection
                     .prepare_cached_common("DELETE FROM game_categories WHERE gid = ?")
-                    .catalog("Failed to remove game categories from catalog DB")?;
+                    .ndl("Failed to remove game categories from catalog DB")?;
                 statement
                     .execute((gid,))
-                    .catalog("Failed to remove game categories from catalog DB")?;
+                    .ndl("Failed to remove game categories from catalog DB")?;
                 changed = true;
             }
             self.categories = game.categories;
@@ -518,10 +406,10 @@ impl Game {
             if !roms_equal {
                 let mut statement = connection
                     .prepare_cached_common("UPDATE games SET revision = revision + 1 WHERE gid = ?")
-                    .catalog("Failed to update games in catalog DB")?;
+                    .ndl("Failed to update games in catalog DB")?;
                 let row_count = statement
                     .execute((gid,))
-                    .catalog("Failed to update games in catalog DB")?;
+                    .ndl("Failed to update games in catalog DB")?;
                 if row_count == 0 {
                     return Err(Error::new_original(format!(
                         "Failed to update games in catalog DB\nCan't bump revision of non-existant game (gid: {gid})"
@@ -532,10 +420,10 @@ impl Game {
             if self.roms.len() != 0 {
                 let mut statement = connection
                     .prepare_cached_common("DELETE FROM roms WHERE gid = ?")
-                    .catalog("Failed to remove ROMs from catalog DB")?;
+                    .ndl("Failed to remove ROMs from catalog DB")?;
                 statement
                     .execute((gid,))
-                    .catalog("Failed to remove ROMs from catalog DB")?;
+                    .ndl("Failed to remove ROMs from catalog DB")?;
             }
             self.roms = game.roms;
             if self.roms.len() != 0 {
@@ -559,7 +447,7 @@ impl Datafile {
     fn get(connection: &impl CanPrepare, name: &str, author: &Author) -> Result<Datafile> {
         let mut statement = connection
             .prepare_cached_common("SELECT * FROM datafiles WHERE name = ?")
-            .catalog("Failed to retrieve datafile meta from catalog DB")?;
+            .ndl("Failed to retrieve datafile meta from catalog DB")?;
         let datafile = statement
             .query_one((name,), |row| {
                 Ok(Datafile {
@@ -572,7 +460,7 @@ impl Datafile {
                 })
             })
             .optional()
-            .catalog("Failed to retrieve datafile meta from catalog DB")?;
+            .ndl("Failed to retrieve datafile meta from catalog DB")?;
         drop(statement);
         match datafile {
             Some(datafile) => Ok(datafile),
@@ -581,10 +469,10 @@ impl Datafile {
                     .prepare_cached_common(
                         "INSERT INTO datafiles (name, author, version, last_updated) VALUES (?, ?, ?, ?)",
                     )
-                    .catalog("Failed to update datafile meta in catalog DB")?;
+                    .ndl("Failed to update datafile meta in catalog DB")?;
                 statement
                     .execute((name, author, "", 0))
-                    .catalog("Failed to update datafile meta in catalog DB")?;
+                    .ndl("Failed to update datafile meta in catalog DB")?;
                 // unless some SQLite tomfoolery happens, there will at most be 1 recursive call
                 drop(statement);
                 Datafile::get(connection, name, author)
@@ -598,7 +486,7 @@ impl Datafile {
         let mut games: HashMap<String, Game> = HashMap::new();
         let mut get_games_stmt = connection
             .prepare_cached_common("SELECT gid, name, revision FROM games WHERE dfid = ?")
-            .catalog("Failed to retrieve games from catalog DB")?;
+            .ndl("Failed to retrieve games from catalog DB")?;
         let game_rows = get_games_stmt
             .query_map((self.dfid,), |row| {
                 Ok(Game {
@@ -611,9 +499,9 @@ impl Datafile {
                     loaded: false,
                 })
             })
-            .catalog("Failed to retrieve games from catalog DB")?;
+            .ndl("Failed to retrieve games from catalog DB")?;
         for game_row in game_rows {
-            let game = game_row.catalog("Failed to retrieve games from catalog DB")?;
+            let game = game_row.ndl("Failed to retrieve games from catalog DB")?;
             games.insert(game.name.clone(), game);
         }
         Ok(games)
@@ -623,14 +511,14 @@ impl Datafile {
             .prepare_cached_common(
                 "UPDATE datafiles SET version = ?, last_updated = ? WHERE dfid = ?",
             )
-            .catalog("Failed to update datafile in catalog DB")?;
+            .ndl("Failed to update datafile in catalog DB")?;
         let rows_changed = statement
             .execute((
                 &self.version,
                 self.last_updated.timestamp_millis(),
                 self.dfid,
             ))
-            .catalog("Failed to update datafile in catalog DB")?;
+            .ndl("Failed to update datafile in catalog DB")?;
         if rows_changed == 1 {
             Ok(())
         } else {
@@ -656,7 +544,7 @@ impl Drop for Catalog {
 
 impl Catalog {
     pub fn init(path: &impl AsRef<Path>) -> Result<Catalog> {
-        let connection = Connection::open(path).catalog("Failed to open catalog DB")?;
+        let connection = Connection::open(path).ndl("Failed to open catalog DB")?;
         connection.set_prepared_statement_cache_capacity(32);
         debug!(
             r#"Opened Catalog database at "{}""#,
@@ -665,32 +553,32 @@ impl Catalog {
         // configure the database
         connection
             .pragma_update(None, "page_size", 16384)
-            .catalog("Failed to configure catalog DB")?;
+            .ndl("Failed to configure catalog DB")?;
         connection
             .pragma_update(None, "cache_size", 2000)
-            .catalog("Failed to configure catalog DB")?;
+            .ndl("Failed to configure catalog DB")?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
-            .catalog("Failed to configure catalog DB")?;
+            .ndl("Failed to configure catalog DB")?;
         connection
             .pragma_update(None, "synchronous", "normal")
-            .catalog("Failed to configure catalog DB")?;
+            .ndl("Failed to configure catalog DB")?;
         // get a list of the database's tables and indexes
         let things = {
             let mut statement = connection
                 .prepare("SELECT * FROM sqlite_master WHERE type = 'table' OR type = 'index'")
-                .catalog("Failed to retrieve created tables from catalog DB")?;
+                .ndl("Failed to retrieve created tables from catalog DB")?;
             let mut tables: HashSet<String> = HashSet::new();
             let mut rows = statement
                 .query(())
-                .catalog("Failed to retrieve created tables from catalog DB")?;
+                .ndl("Failed to retrieve created tables from catalog DB")?;
             while let Some(row) = rows
                 .next()
-                .catalog("Failed to retrieve created tables from catalog DB")?
+                .ndl("Failed to retrieve created tables from catalog DB")?
             {
                 tables.insert(
                     row.get("name")
-                        .catalog("Failed to retrieve created tables from catalog DB")?,
+                        .ndl("Failed to retrieve created tables from catalog DB")?,
                 );
             }
             tables
@@ -712,7 +600,7 @@ impl Catalog {
                     "#,
                     (),
                 )
-                .catalog("Failed to create tables in catalog DB")?;
+                .ndl("Failed to create tables in catalog DB")?;
             debug!("Created \"datafiles\" table");
             changed = true;
         }
@@ -730,7 +618,7 @@ impl Catalog {
                     "#,
                     (),
                 )
-                .catalog("Failed to create tables in catalog DB")?;
+                .ndl("Failed to create tables in catalog DB")?;
             debug!("Created \"games\" table");
             changed = true;
         }
@@ -745,7 +633,7 @@ impl Catalog {
                     "#,
                     (),
                 )
-                .catalog("Failed to create tables in catalog DB")?;
+                .ndl("Failed to create tables in catalog DB")?;
             debug!("Created \"game_categories\" table");
             changed = true;
         }
@@ -766,7 +654,7 @@ impl Catalog {
                     "#,
                     (),
                 )
-                .catalog("Failed to create tables in catalog DB")?;
+                .ndl("Failed to create tables in catalog DB")?;
             debug!("Created \"roms\" table");
             changed = true;
         }
@@ -780,7 +668,7 @@ impl Catalog {
                     "#,
                     (),
                 )
-                .catalog("Failed to create tables in catalog DB")?;
+                .ndl("Failed to create tables in catalog DB")?;
             debug!("Created \"game_category_index\" index");
             changed = true;
         }
@@ -794,7 +682,7 @@ impl Catalog {
                     "#,
                     (),
                 )
-                .catalog("Failed to create tables in catalog DB")?;
+                .ndl("Failed to create tables in catalog DB")?;
             debug!("Created \"game_roms\" index");
             changed = true;
         }
@@ -802,7 +690,7 @@ impl Catalog {
         if changed {
             connection
                 .execute("PRAGMA optimize;", ())
-                .catalog("Failed to optimize catalog DB")?;
+                .ndl("Failed to optimize catalog DB")?;
             debug!("Optimized");
         }
         // return the database
@@ -820,7 +708,7 @@ impl Catalog {
         let transaction = self
             .connection
             .transaction()
-            .catalog("Failed to start transaction in catalog DB")?;
+            .ndl("Failed to start transaction in catalog DB")?;
         let mut stored_games: HashMap<String, Game> =
             datafile.get_all_games_unloaded(&transaction)?;
         debug!("Previously stored games: {}", stored_games.len());
@@ -859,7 +747,7 @@ impl Catalog {
         }
         transaction
             .commit()
-            .catalog("Failed to commit changes to catalog DB")?;
+            .ndl("Failed to commit changes to catalog DB")?;
         debug!(
             "Changed entries: {}\nUnchanged entries: {}\nAdded entries: {}\nRemoved entries: {}",
             changed_entries, unchanged_entries, new_entries, removed_games
@@ -871,10 +759,10 @@ impl Catalog {
         let mut statement = self
             .connection
             .prepare_cached("SELECT MIN(last_updated) FROM datafiles WHERE author = ?")
-            .catalog("Failed to optimize No-Intro requests")?;
+            .ndl("Failed to optimize No-Intro requests")?;
         match statement
             .query_one(("No-Intro",), |row| Ok(row.get(0).unwrap()))
-            .catalog("Failed to optimize No-Intro requests")?
+            .ndl("Failed to optimize No-Intro requests")?
         {
             Some(timestamp) => Ok(DateTime::from_timestamp_millis(timestamp).unwrap()),
             None => Ok(DateTime::from_timestamp_millis(0).unwrap()),
