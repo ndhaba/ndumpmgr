@@ -6,8 +6,8 @@ use std::{
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use compress_tools::uncompress_archive;
+use fancy_regex::Regex;
 use log::debug;
-use regex::Regex;
 use tempfile::{NamedTempFile, TempDir};
 use ureq::{Agent, Body, ResponseExt, http::Response};
 use visdom::{Vis, types::Elements};
@@ -274,7 +274,7 @@ pub(super) fn load_datafile_links(agent: &Agent) -> Result<HashMap<String, Dataf
                     }
                 },
                 last_updated: NaiveDateTime::parse_from_str(
-                    &time_regex.captures(&last_td.text()).unwrap()["time"],
+                    &time_regex.captures(&last_td.text()).unwrap().unwrap()["time"],
                     "%Y-%m-%d %H:%M:%S",
                 )
                 .unwrap()

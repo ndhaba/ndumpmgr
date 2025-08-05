@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use log::{LevelFilter, info};
-use ndumplib::catalog::Catalog;
+use log::LevelFilter;
+use ndumplib::DumpManager;
 use simplelog::{ConfigBuilder, TermLogger};
 
 mod settings;
@@ -47,13 +47,11 @@ fn import(_path: Option<String>, _settings: settings::Settings) {}
 /// Sorts the currently stored game dumps by console
 fn sort(_settings: settings::Settings, locations: &StorageLocations) {
     // setup databases
-    let mut catalog = Catalog::init(&locations.default_data_path.join("catalog.sqlite"))
+    let mut manager = DumpManager::init(&locations.default_data_path.as_path().to_str().unwrap())
         .unwrap_or_else(|err| error_exit!("{}", err));
-    // check for updates
-    info!("Checking for game updates");
-    catalog
-        .update_all_consoles()
-        .unwrap_or_else(|err| error_exit!("{err}"));
+    manager
+        .update()
+        .unwrap_or_else(|err| error_exit!("{}", err));
 }
 
 fn main() {

@@ -11,11 +11,10 @@ use rusqlite::{
     Connection, OptionalExtension, ToSql,
     types::{FromSql, FromSqlError, ToSqlOutput},
 };
-use sha1::{Digest, Sha1};
-use tempfile::TempDir;
 use ureq::{Agent, agent};
 
-use crate::{Error, GameConsole, Result, ResultUtils, catalog::logiqx::GameElement, utils::*};
+use self::logiqx::GameElement;
+use crate::{Error, GameConsole, Result, ResultUtils, utils::*};
 
 mod logiqx;
 mod nointro;
@@ -532,66 +531,8 @@ impl Datafile {
     }
 }
 
-struct Cuesheet {
-    pub console: GameConsole,
-    pub last_updated: DateTime<Utc>,
-}
-impl Cuesheet {
-    fn get(connection: &impl CanPrepare, console: GameConsole) -> Result<Cuesheet> {
-        let mut statement = connection
-            .prepare_cached_common("SELECT * FROM cuesheets WHERE console = ?")
-            .ndl("Failed to retrieve cuesheet meta from catalog DB")?;
-        let cuesheet = statement
-            .query_one((console.formal_name(),), |row| {
-                Ok(Cuesheet {
-                    console,
-                    last_updated: DateTime::from_timestamp_millis(row.get("last_updated").unwrap())
-                        .unwrap(),
-                })
-            })
-            .optional()
-            .ndl("Failed to retrieve cuesheet meta from catalog DB")?;
-        drop(statement);
-        match cuesheet {
-            Some(cuesheet) => Ok(cuesheet),
-            None => {
-                let mut statement = connection
-                    .prepare_cached_common(
-                        "INSERT INTO cuesheets (console, last_updated) VALUES (?, ?)",
-                    )
-                    .ndl("Failed to update cuesheet meta in catalog DB")?;
-                statement
-                    .execute((console.formal_name(), 0))
-                    .ndl("Failed to update cuesheet meta in catalog DB")?;
-                // unless some SQLite tomfoolery happens, there will at most be 1 recursive call
-                drop(statement);
-                Cuesheet::get(connection, console)
-            }
-        }
-    }
-    fn update(&self, connection: &impl CanPrepare) -> Result<()> {
-        let mut statement = connection
-            .prepare_cached_common("UPDATE cuesheets SET last_updated = ? WHERE console = ?")
-            .ndl("Failed to update cuesheets in catalog DB")?;
-        let rows_changed = statement
-            .execute((
-                self.last_updated.timestamp_millis(),
-                self.console.formal_name(),
-            ))
-            .ndl("Failed to update cuesheets in catalog DB")?;
-        if rows_changed == 1 {
-            Ok(())
-        } else {
-            Err(Error::new_original(
-                "Failed to update cuesheets in catalog DB\nAttempted to update non-existant cuesheets in DB",
-            ))
-        }
-    }
-}
-
 pub struct Catalog {
     connection: Connection,
-    cue_update_delay: TimeDelta,
     dat_update_delay: TimeDelta,
 }
 
@@ -605,57 +546,15 @@ impl Drop for Catalog {
 impl Catalog {
     pub fn init(path: &impl AsRef<Path>) -> Result<Catalog> {
         let connection = Connection::open(path).ndl("Failed to open catalog DB")?;
-        connection.set_prepared_statement_cache_capacity(32);
+        setup_database_default_config(&connection)?;
         debug!(
             r#"Opened Catalog database at "{}""#,
             path.as_ref().to_str().unwrap()
         );
-        // configure the database
-        connection
-            .pragma_update(None, "page_size", 16384)
-            .ndl("Failed to configure catalog DB")?;
-        connection
-            .pragma_update(None, "cache_size", 2000)
-            .ndl("Failed to configure catalog DB")?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .ndl("Failed to configure catalog DB")?;
-        connection
-            .pragma_update(None, "synchronous", "normal")
-            .ndl("Failed to configure catalog DB")?;
-        // get a list of the database's tables and indexes
+        // create missing tables and indexes
         let tables = get_database_tables(&connection)?;
         let indexes = get_database_indexes(&connection)?;
-        // create missing tables and indexes
         let mut changed = false;
-        if !tables.contains("cuesheets") {
-            connection
-                .execute(
-                    r#"
-                        CREATE TABLE "cuesheets" (
-                            "console"	TEXT NOT NULL UNIQUE,
-                            "last_updated"	INTEGER NOT NULL,
-                            PRIMARY KEY("console")
-                        )
-                    "#,
-                    (),
-                )
-                .ndl("Failed to create tables in catalog DB")?;
-        }
-        if !tables.contains("cues") {
-            connection
-                .execute(
-                    r#"
-                        CREATE TABLE "cues" (
-                            "sha1"	BLOB NOT NULL UNIQUE,
-                            "content"	TEXT NOT NULL,
-                            PRIMARY KEY("sha1")
-                        )
-                    "#,
-                    (),
-                )
-                .ndl("Failed to create tables in catalog DB")?;
-        }
         if !tables.contains("datafiles") {
             connection
                 .execute(
@@ -757,6 +656,20 @@ impl Catalog {
             debug!("Created \"game_roms\" index");
             changed = true;
         }
+        if !indexes.contains_key("sha1_roms") {
+            connection
+                .execute(
+                    r#"
+                        CREATE INDEX "sha1_roms" ON "roms" (
+                            "sha1"	DESC
+                        )
+                    "#,
+                    (),
+                )
+                .ndl("Failed to create tables in catalog DB")?;
+            debug!("Created \"sha1_roms\" index");
+            changed = true;
+        }
         // optimize the database if the tables were changed
         if changed {
             connection
@@ -767,9 +680,19 @@ impl Catalog {
         // return the database
         Ok(Catalog {
             connection,
-            cue_update_delay: TimeDelta::days(7),
             dat_update_delay: TimeDelta::days(2),
         })
+    }
+
+    pub fn is_rom(&self, sha1: [u8; 20]) -> Result<bool> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM roms WHERE sha1 = ? LIMIT 1)")
+            .ndl("Failed to check for ROM in catalog DB")?;
+        let result: i64 = statement
+            .query_one((sha1,), |f| Ok(f.get(0).unwrap()))
+            .ndl("Failed to check for ROM in catalog DB")?;
+        Ok(result == 1)
     }
 
     fn import_datafile_games<'a>(
@@ -910,52 +833,6 @@ impl Catalog {
         Ok(())
     }
 
-    fn import_cues(&mut self, dir: TempDir) -> Result<()> {
-        let transaction = self
-            .connection
-            .transaction()
-            .ndl("Failed to import cues to catalog DB")?;
-        let mut statement = transaction
-            .prepare_cached("INSERT OR IGNORE INTO cues (sha1, content) VALUES (?, ?)")
-            .ndl("Failed to import cues to catalog DB")?;
-        for file in std::fs::read_dir(&dir).ndl("Failed to import cues to catalog DB")? {
-            let path = file.ndl("Failed to import cues to catalog DB")?.path();
-            if !path.is_file() {
-                continue;
-            }
-            let content =
-                std::fs::read_to_string(path).ndl("Failed to import cues to catalog DB")?;
-            let mut sha1 = Sha1::new();
-            sha1.update(&content);
-            let hash: [u8; 20] = sha1.finalize().into();
-            statement
-                .execute((hash, content))
-                .ndl("Failed to import cues to catalog DB")?;
-        }
-        drop(statement);
-        transaction
-            .commit()
-            .ndl("Failed to import cues to catalog DB")?;
-        Ok(())
-    }
-
-    fn update_redump_cuesheets(&mut self, console: GameConsole) -> Result<()> {
-        let mut cuesheet = Cuesheet::get(&self.connection, console)?;
-        if Utc::now()
-            < cuesheet
-                .last_updated
-                .checked_add_signed(self.cue_update_delay)
-                .unwrap()
-        {
-            return Ok(());
-        }
-        self.import_cues(redump::download_cuesheets(console.redump_slug().unwrap())?)?;
-        cuesheet.last_updated = Utc::now();
-        cuesheet.update(&self.connection)?;
-        info!("Updated {} cuesheet", console.formal_name());
-        Ok(())
-    }
-
     pub fn update_all_consoles(&mut self) -> Result<()> {
         if Utc::now()
             >= self
@@ -989,7 +866,6 @@ impl Catalog {
             self.update_redump_console(GameConsole::Xbox)?;
             self.update_redump_console(GameConsole::Xbox360)?;
         }
-        self.update_redump_cuesheets(GameConsole::PSX)?;
         Ok(())
     }
 }
